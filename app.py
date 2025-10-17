@@ -77,7 +77,7 @@ def get_recent_history(username, category):
     user = load_user(username)
     conversations = user["conversation_history"]
     if category == "discussive":
-        limit = 20
+        limit = 20      
     elif category == "suggestive":
         limit = 12
     elif category == "humorous":
@@ -160,7 +160,7 @@ def handle_suggestive(user_input, username):
     - Be encouraging and positive while remaining realistic
     - Reference their interests and preferences when relevant
     - Offer 2-3 concrete suggestions or tips they can act on
-    - Keep responses concise but informative (3-5 sentences)
+    - Keep responses concise but informative (2-3 sentences)
     - Respond as a friendly human would, not a formal advisor
     </Your Role>
 
@@ -222,7 +222,7 @@ def handle_discussive(user_input, username):
     - Use their interests and background to personalize responses
     - Show you remember previous conversations
     - Balance listening with contributing meaningful thoughts
-    - Keep responses conversational (3-6 sentences)
+    - Keep responses conversational (2-3 sentences)
     - Don't force positivity if they're expressing difficult emotions
 
     User Profile:
