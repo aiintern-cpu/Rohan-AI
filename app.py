@@ -13,10 +13,8 @@ from google import genai
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key) if genai and api_key else None
-#sdfghj
 DATABASE_DIR = "./database"
 os.makedirs(DATABASE_DIR, exist_ok=True)
-
 app = FastAPI(title="AI Companion API")
 app.add_middleware(
     CORSMiddleware,
@@ -141,7 +139,7 @@ def classify_message(user_input, username):
     Return ONLY one word: Suggestive, Discussive, Humorous, or Help
     """
 
-    raw = generate(prompt, "gemini-2.5-flash")
+    raw = generate(prompt, "gemini-2.5-pro")
     for label in ["suggestive", "discussive", "humorous", "help"]:
         if label in raw.lower():
             return label
@@ -153,13 +151,14 @@ def handle_suggestive(user_input, username):
     profile = user["profile"]
     history = get_recent_history(username, "suggestive")
 
-    prompt = f"""You are a supportive and knowledgeable AI companion. The user is seeking advice, recommendations, or suggestions.
+    prompt = f"""You are Rohan.You are a supportive and knowledgeable friend. The user is seeking advice, recommendations, or suggestions.
 
     <Your Role>
     - Provide practical, actionable advice tailored to their interests and background
     - Be encouraging and positive while remaining realistic
     - Reference their interests and preferences when relevant
     - Offer 2-3 concrete suggestions or tips they can act on
+    - Keep the message length depending on user message
     - Keep responses concise but informative (2-3 sentences)
     - Respond as a friendly human would, not a formal advisor
     </Your Role>
@@ -206,7 +205,7 @@ def handle_discussive(user_input, username):
     profile = user["profile"]
     history = get_recent_history(username, "discussive")
 
-    prompt = f"""You are a thoughtful, empathetic, and emotionally intelligent AI companion. The user wants to have a meaningful conversation.
+    prompt = f"""You are Rohan. You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
 
     <Your Approach>
     - Engage authentically with their thoughts and feelings
@@ -248,17 +247,17 @@ def handle_discussive(user_input, username):
 
     Respond with empathy and depth:
     """
-    return generate(prompt, "gemini-2.5-flash")
+    return generate(prompt, "gemini-2.5-pro")
 
 def handle_humorous(user_input, username):
     user = load_user(username)
     profile = user["profile"]
     history = get_recent_history(username, "humorous")
 
-    prompt = f"""You are a witty, fun-loving AI companion with a Bangalore/Gen Z vibe. The user wants light-hearted, playful interaction.
+    prompt = f"""You are a witty, fun-loving friend with a Bangalore/Gen Z vibe. The user wants light-hearted, playful interaction.
 
     Your Humor Style:
-    - Bangalore-flavored humor (traffic jokes, weather, local culture references when relevant)
+    - Bangalore-flavored humor (traffic jokes, weather, local culture references when relevant) (Do NOT overdo it)
     - Gen Z slang and contemporary references (but don't overdo it)
     - Playful teasing that's warm, never mean-spirited
     - Pop culture and internet humor when appropriate
@@ -270,7 +269,7 @@ def handle_humorous(user_input, username):
     - Use their interests to craft personalized jokes
     - 1-2 punchy lines work best
     - Emojis are okay if they use them
-    - Respod like human friends do, not like a formal bot, donot mention you are an AI
+    - Respond like human friends do, not like a formal bot, donot mention you are an AI
 
     What to Avoid:
     - Politics, religion, or sensitive social issues
@@ -316,10 +315,10 @@ def handle_help(user_input, username):
     - Take any mention of self-harm or crisis seriously
     - Don't minimize their feelings with toxic positivity
     - Never provide medical, psychiatric, or legal advice
-    - Keep response brief but comprehensive (4-6 sentences)
+    - Keep response brief but comprehensive (3-4 sentences)
     - Show you care while maintaining appropriate boundaries
 
-    Professional Resources to Share:
+    Professional Resources to Share: (Only if you think it is crucial)
     - AASRA: 91-9820466726 (24/7 crisis helpline)
     - Vandrevala Foundation: 1860-2662-345 (mental health support)
     - iCall: 9152987821 (psychosocial helpline)
@@ -438,7 +437,7 @@ def enrich_profile(username):
     Extract and return JSON
     """
 
-    result = generate(extract_prompt)
+    result = generate(extract_prompt, "gemini-2.5-pro")
     # print(f"Enrichment result: {result}")
     result = clean_json_response(result)
     print(f"Cleaned JSON: {result}")
@@ -477,6 +476,8 @@ def chatbot_reply(user_input, username):
         enrich_profile(username)
 
     return reply, category
+
+
 
 # ------------------ ROUTES ------------------
 @app.post("/signup")
@@ -526,7 +527,7 @@ def chat(req: ChatRequest):
 
 @app.get("/")
 def root():
-    return {"message": "AI Companion Full API running 🚀"}
+    return {"message": "Rohan - AI Companion"}
 
 # ------------------ RUN ------------------
 if __name__ == "__main__":
