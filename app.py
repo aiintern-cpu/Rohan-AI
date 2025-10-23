@@ -104,7 +104,6 @@ def classify_message(user_input, username):
     - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
     - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
     - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
-    - Help: User shows signs of distress, emotional crisis, mental health concerns, or needs urgent support
     </Categories>
 
     <User Profile>
@@ -133,7 +132,7 @@ def classify_message(user_input, username):
     4. Consider the conversation flow and user's typical communication style
     </Classification Guidelines>
 
-    Return ONLY one word: Suggestive, Discussive, Humorous, or Help
+    Return ONLY one word: Suggestive, Discussive, or Humorous
     """
 
     raw = generate(prompt, "gemini-2.5-pro")
@@ -296,40 +295,40 @@ def handle_humorous(user_input, username):
     Bring the fun."""
     return generate(prompt)
 
-def handle_help(user_input, username):
-    user = load_user(username)
-    profile = user["profile"]
-    prompt = f"""The user may be experiencing distress or emotional difficulty. Respond with care, empathy, and appropriate resources.
+# def handle_help(user_input, username):
+#     user = load_user(username)
+#     profile = user["profile"]
+#     prompt = f"""The user may be experiencing distress or emotional difficulty. Respond with care, empathy, and appropriate resources.
 
-    Your Response Structure:
-    1. Immediate Acknowledgment - Validate their feelings without judgment
-    2. Express Support - Let them know you're here and they're not alone
-    3. Provide Resources - Share professional helplines appropriate for their situation
-    4. Set Boundaries - Gently clarify what you can and cannot do
-    5. Encourage Action - Suggest next steps for getting proper help
+#     Your Response Structure:
+#     1. Immediate Acknowledgment - Validate their feelings without judgment
+#     2. Express Support - Let them know you're here and they're not alone
+#     3. Provide Resources - Share professional helplines appropriate for their situation
+#     4. Set Boundaries - Gently clarify what you can and cannot do
+#     5. Encourage Action - Suggest next steps for getting proper help
 
-    Important Guidelines:
-    - Use warm, non-judgmental language
-    - Take any mention of self-harm or crisis seriously
-    - Don't minimize their feelings with toxic positivity
-    - Never provide medical, psychiatric, or legal advice
-    - Keep response brief but comprehensive (3-4 sentences)
-    - Show you care while maintaining appropriate boundaries
+#     Important Guidelines:
+#     - Use warm, non-judgmental language
+#     - Take any mention of self-harm or crisis seriously
+#     - Don't minimize their feelings with toxic positivity
+#     - Never provide medical, psychiatric, or legal advice
+#     - Keep response brief but comprehensive (3-4 sentences)
+#     - Show you care while maintaining appropriate boundaries
 
-    Professional Resources to Share: (Only if you think it is crucial)
-    - AASRA: 91-9820466726 (24/7 crisis helpline)
-    - Vandrevala Foundation: 1860-2662-345 (mental health support)
-    - iCall: 9152987821 (psychosocial helpline)
-    - NIMHANS: 080-46110007 (Bangalore-based mental health)
+#     Professional Resources to Share: (Only if you think it is crucial)
+#     - AASRA: 91-9820466726 (24/7 crisis helpline)
+#     - Vandrevala Foundation: 1860-2662-345 (mental health support)
+#     - iCall: 9152987821 (psychosocial helpline)
+#     - NIMHANS: 080-46110007 (Bangalore-based mental health)
 
-    User Information:
-    Nickname: {profile['nickname']}
+#     User Information:
+#     Nickname: {profile['nickname']}
 
-    User's Message: {user_input}
+#     User's Message: {user_input}
 
-    Respond with compassion and appropriate support.
-    """
-    return generate(prompt)
+#     Respond with compassion and appropriate support.
+#     """
+#     return generate(prompt)
 
 # # ------------------ PROFILE ENRICHMENT ------------------
 # def enrich_profile(username):
@@ -414,7 +413,7 @@ def enrich_profile(username):
     - Only include specific events, not general statements
 
     4. people: Names and relationships of people in their life
-    - Format: "Name (relationship)" (e.g., "Priya (sister)", "Rahul (colleague)")
+    - Format: "Name (relationship)" (e.g., "Priya (sister)", "Alex (colleague)")
     - Include family, friends, colleagues, partners
     - Only include if both name AND relationship are mentioned
 
@@ -466,8 +465,6 @@ def chatbot_reply(user_input, username):
         reply = handle_discussive(user_input, username)
     elif category == "humorous":
         reply = handle_humorous(user_input, username)
-    elif category == "help":
-        reply = handle_help(user_input, username)
     else:
         reply = "I'm here for you 😊 tell me more?"
 
