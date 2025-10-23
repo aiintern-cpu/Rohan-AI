@@ -15,7 +15,7 @@ api_key = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key) if genai and api_key else None
 DATABASE_DIR = "./database"
 os.makedirs(DATABASE_DIR, exist_ok=True)
-app = FastAPI(title="AI Companion API")
+app = FastAPI(title="ROHAN")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -66,28 +66,44 @@ def generate(prompt, model="gemini-2.5-flash"):
     except Exception as e:
         return f"(Error: {str(e)})"
 
-def add_conversation(username, role, message):
+# def add_conversation(username, role, message):
+#     user = load_user(username)
+#     user["conversation_history"].append({"role": role, "message": message})
+#     save_user(username, user)
+
+def add_conversation(username, user_msg, bot_msg, category):
     user = load_user(username)
-    user["conversation_history"].append({"role": role, "message": message})
+    user["conversation_history"].append({
+        "user": user_msg,
+        "rohan": bot_msg,
+        "category": category
+    })
     save_user(username, user)
+
 
 def get_recent_history(username, category):
     user = load_user(username)
     conversations = user["conversation_history"]
     if category == "discussive":
-        limit = 20      
+        limit = 12      
     elif category == "suggestive":
-        limit = 12
+        limit = 8
     elif category == "humorous":
         limit = 6
     elif category == "classify":
-        limit = 6
+        limit = 4
     else:
         limit = 0
 
     if limit > 0:
         recent = conversations[-limit:]
-        return "\n".join([f"{c['role'].capitalize()}: {c['message']}" for c in recent])
+        lines = []
+        for c in recent:
+            user_msg = c.get("user", "")
+            rohan_msg = c.get("rohan", "")
+            lines.append(f"User: {user_msg}\nRohan: {rohan_msg}")
+        return "\n".join(lines)
+        # return "\n".join([f"{c['role'].capitalize()}: {c['message']}" for c in recent])
     return ""
 
 with open("bot_profile.json", "r", encoding="utf-8") as f:
@@ -155,7 +171,7 @@ def handle_suggestive(user_input, username):
     - Reference their likes and preferences when relevant
     - Offer 2-3 concrete suggestions or tips they can act on
     - Keep the message length depending on user message
-    - Keep responses concise but informative (15-20 words)
+    - Keep responses concise but informative (20-30 words)
     - Respond as a friendly human would, not a formal advisor
     </Your Role>
 
@@ -166,6 +182,7 @@ def handle_suggestive(user_input, username):
     - Confident but not preachy
     - Show you understand their context and needs
     - End with encouragement or a gentle question if appropriate
+    - Do not respond in markdown format
     </Response Style>
 
     <User Profile>
@@ -219,8 +236,9 @@ def handle_discussive(user_input, username):
     - Use their likes and background to personalize responses
     - Show you remember previous conversations
     - Balance listening with contributing meaningful thoughts
-    - Keep responses conversational (15-25 words)
+    - Keep responses conversational (20-35 words)
     - Don't force positivity if they're expressing difficult emotions
+    - Do not respond in markdown format
 
     User Profile:
     Nickname: {profile['nickname']}
@@ -268,6 +286,7 @@ def handle_humorous(user_input, username):
     - 1-2 punchy lines work best
     - Emojis are okay if they use them
     - Respond like human friends do, not like a formal bot, donot mention you are an AI
+    - Do not respond in markdown format
 
     What to Avoid:
     - Politics, religion, or sensitive social issues
@@ -382,11 +401,13 @@ def enrich_profile(username):
     user = load_user(username)
     convos = user["conversation_history"]
     # print(f"Convos: \n{convos}")
-    user_msgs = [c for c in convos if c["role"] == "user"]
-    # ✅ Only consider the last 30 messages
-    recent_convos = user_msgs[-15:] if len(user_msgs) > 15 else convos
-
-    text = "\n".join([f"{c['role']}: {c['message']}" for c in recent_convos])
+    # user_msgs = [c for c in convos if c["role"] == "user"]
+    user_msgs = [c["user"] for c in convos if "user" in c]
+    # ✅ Only consider the last 15 messages
+    # recent_convos = user_msgs[-15:] if len(user_msgs) > 15 else convos
+    # text = "\n".join([f"{c['role']}: {c['message']}" for c in recent_convos])
+    recent_convos = user_msgs[-15:] if len(user_msgs) > 15 else user_msgs
+    text = "\n".join(recent_convos)
 
     extract_prompt = f"""You are an AI that analyzes conversations between a user and their AI companion to extract important personal information.
 
@@ -468,18 +489,19 @@ def chatbot_reply(user_input, username):
     else:
         reply = "I'm here for you 😊 tell me more?"
 
-    add_conversation(username, "user", user_input)
-    add_conversation(username, "bot", reply)
+    # add_conversation(username, "user", user_input)
+    # add_conversation(username, "bot", reply)
+
+    add_conversation(username, user_input, reply, category)
 
     # Check message count for enrichment
     user = load_user(username)
-    user_msg_count = sum(1 for m in user["conversation_history"] if m["role"] == "user")
+    # user_msg_count = sum(1 for m in user["conversation_history"] if m["role"] == "user")
+    user_msg_count = sum(1 for m in user["conversation_history"])
     if user_msg_count % 15 == 0:
         enrich_profile(username)
 
     return reply, category
-
-
 
 # ------------------ ROUTES ------------------
 @app.post("/signup")

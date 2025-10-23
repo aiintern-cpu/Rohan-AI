@@ -3,3 +3,4 @@ database/
 __pycache__/ 
 __pycache__/app.cpython-313.pyc
 .env
+database_obsolete/
