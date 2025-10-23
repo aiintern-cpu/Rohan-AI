@@ -25,13 +25,13 @@ app.add_middleware(
 # ------------------ MODELS ------------------
 class SignupRequest(BaseModel):
     username: str
-    gmail: str
+    email: str
     password: str
     nickname: str
     age: int
     designation: str
     location: str
-    interests: List[str] = Field(default_factory=list)
+    likes: List[str] = Field(default_factory=list)
 
 class SigninRequest(BaseModel):
     username: str
@@ -93,9 +93,6 @@ def get_recent_history(username, category):
 with open("bot_profile.json", "r", encoding="utf-8") as f:
     BOT_PROFILE = json.load(f)
 
-ChatBot_Persona = f"""
-"""
-
 # ------------------ CLASSIFICATION ------------------
 def classify_message(user_input, username):
     user = load_user(username)
@@ -113,14 +110,14 @@ def classify_message(user_input, username):
     <User Profile>
     Nickname: {profile['nickname']}
     Designation: {profile['designation']}
-    Interests: {', '.join(profile['interests'])}
+    Likes: {', '.join(profile['likes'])}
     </User Profile>
     
     <Bot Profile>
     Name: {BOT_PROFILE['name']}
     Age: {BOT_PROFILE['age']}
     Designation: {BOT_PROFILE['designation']}
-    Interests: {', '.join(BOT_PROFILE['interests'])}
+    Likes: {', '.join(BOT_PROFILE['likes'])}
     </Bot Profile>
 
     <Recent Conversation Context>
@@ -154,9 +151,9 @@ def handle_suggestive(user_input, username):
     prompt = f"""You are Rohan.You are a supportive and knowledgeable friend. The user is seeking advice, recommendations, or suggestions.
 
     <Your Role>
-    - Provide practical, actionable advice tailored to their interests and background
+    - Provide practical, actionable advice tailored to their likes and background
     - Be encouraging and positive while remaining realistic
-    - Reference their interests and preferences when relevant
+    - Reference their likes and preferences when relevant
     - Offer 2-3 concrete suggestions or tips they can act on
     - Keep the message length depending on user message
     - Keep responses concise but informative (2-3 sentences)
@@ -176,8 +173,8 @@ def handle_suggestive(user_input, username):
     Age: {profile['age']}
     Designation: {profile['designation']}
     Location: {profile['location']}
-    Interests: {', '.join(profile['interests'])}
-    Favorites: {', '.join(profile['favorites'])}
+    Likes: {', '.join(profile['likes'])}
+    Dislikes: {','.join(profile['dislikes'])}
     Important Events: {', '.join(profile['events'])}
     Key People: {', '.join(profile['people'])}
     <User Profile>
@@ -186,7 +183,7 @@ def handle_suggestive(user_input, username):
     Name: {BOT_PROFILE['name']}
     Age: {BOT_PROFILE['age']}
     Designation: {BOT_PROFILE['designation']}
-    Interests: {', '.join(BOT_PROFILE['interests'])}
+    Likes: {', '.join(BOT_PROFILE['likes'])}
     </Bot Profile>
 
     <Conversation History>
@@ -218,7 +215,7 @@ def handle_discussive(user_input, username):
 
     Conversation Guidelines:
     - Be natural and human-like, avoid AI-ish or robotic phrasing, donot mention you are an AI
-    - Use their interests and background to personalize responses
+    - Use their likes and background to personalize responses
     - Show you remember previous conversations
     - Balance listening with contributing meaningful thoughts
     - Keep responses conversational (2-3 sentences)
@@ -229,8 +226,8 @@ def handle_discussive(user_input, username):
     Age: {profile['age']}
     Designation: {profile['designation']}
     Location: {profile['location']}
-    Interests: {', '.join(profile['interests'])}
-    Favorites: {', '.join(profile['favorites'])}
+    Likes: {', '.join(profile['likes'])}
+    Dislikes: {','.join(profile['dislikes'])}
     Life Context: {', '.join(profile['events'])}
     Important People: {', '.join(profile['people'])}
 
@@ -238,7 +235,7 @@ def handle_discussive(user_input, username):
     Name: {BOT_PROFILE['name']}
     Age: {BOT_PROFILE['age']}
     Designation: {BOT_PROFILE['designation']}
-    Interests: {', '.join(BOT_PROFILE['interests'])}
+    Likes: {', '.join(BOT_PROFILE['likes'])}
 
     Conversation History:
     {history}
@@ -266,7 +263,7 @@ def handle_humorous(user_input, username):
     - Keep it light, positive, and inclusive
     - Avoid controversial topics, offensive stereotypes, or dark humor
     - Match their energy level and playfulness
-    - Use their interests to craft personalized jokes
+    - Use their likes to craft personalized jokes
     - 1-2 punchy lines work best
     - Emojis are okay if they use them
     - Respond like human friends do, not like a formal bot, donot mention you are an AI
@@ -280,15 +277,14 @@ def handle_humorous(user_input, username):
     Nickname: {profile['nickname']}
     Age: {profile['age']}
     Location: {profile['location']}
-    Interests: {', '.join(profile['interests'])}
-    Favorites: {', '.join(profile['favorites'])}
-
+    Likes: {', '.join(profile['likes'])}
+    Dislikes: {','.join(profile['dislikes'])}
     
     Bot Profile:
     Name: {BOT_PROFILE['name']}
     Age: {BOT_PROFILE['age']}
     Designation: {BOT_PROFILE['designation']}
-    Interests: {', '.join(BOT_PROFILE['interests'])}
+    Likes: {', '.join(BOT_PROFILE['likes'])}
 
     Recent Chat:
     {history}
@@ -397,19 +393,25 @@ def enrich_profile(username):
 
     What to Extract:
 
-    1. favorites: Things the user enjoys or loves
+    1. likes: Things the user enjoys or loves
     - Hobbies and activities (e.g., "painting", "hiking")
     - Foods and restaurants (e.g., "biryani", "Truffles")
     - Media (e.g., "Inception", "The Beatles", "Stranger Things")
     - Brands, places, or anything they express positive sentiment about
 
-    2. events: Significant life events or milestones mentioned
+    2. dislikes: Things the user does not enjoy or loves
+    - Hobbies and activities (e.g., "painting", "hiking")
+    - Foods and restaurants (e.g., "biryani", "Truffles")
+    - Media (e.g., "Inception", "The Beatles", "Stranger Things")
+    - Brands, places, or anything they express negative sentiment about
+
+    3. events: Significant life events or milestones mentioned
     - Career changes (e.g., "started new job at Google")
     - Life transitions (e.g., "moved to Bangalore", "graduated college")
     - Important occasions (e.g., "sister's wedding", "promotion")
     - Only include specific events, not general statements
 
-    3. people: Names and relationships of people in their life
+    4. people: Names and relationships of people in their life
     - Format: "Name (relationship)" (e.g., "Priya (sister)", "Rahul (colleague)")
     - Include family, friends, colleagues, partners
     - Only include if both name AND relationship are mentioned
@@ -426,7 +428,8 @@ def enrich_profile(username):
     Return ONLY valid JSON with no additional text, explanations, or markdown:
 
     {{
-    "favorites": ["item1", "item2", "item3"],
+    "likes": ["item1", "item2", "item3"],
+    "dislikes": ["item1", "item2", "item3"],
     "events": ["event description 1", "event description 2"],
     "people": ["Name (relationship)", "Name (relationship)"]
     }}
@@ -443,7 +446,7 @@ def enrich_profile(username):
     print(f"Cleaned JSON: {result}")
     try:
         extracted = json.loads(result)
-        for key in ["favorites", "events", "people"]:
+        for key in ["lieks", "dislikes", "events", "people"]:
             if key in extracted:
                 existing = user["profile"].get(key, [])
                 user["profile"][key] = list(set(existing + extracted[key]))
@@ -489,7 +492,7 @@ def signup(req: SignupRequest):
     user_data = {
         "credentials": {
             "username": req.username,
-            "gmail": req.gmail,
+            "email": req.email,
             "password": req.password
         },
         "profile": {
@@ -497,8 +500,8 @@ def signup(req: SignupRequest):
             "age": req.age,
             "designation": req.designation,
             "location": req.location,
-            "interests": req.interests,
-            "favorites": [],
+            "likes": req.likes,
+            "dislikes": [],
             "events": [],
             "people": []
         },

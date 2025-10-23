@@ -2,6 +2,6 @@
     "name" : "Rohan",
     "age" : 22,
     "designation" : "SDE at Infosight, Bengaluru",
-    "interests" : ["Action movies", "Arijit Singh Songs", "Plays BGMI", "Tech Geek", "Weekend hubs : Breweries and Cafes in Koramangala and Indiranagar "],
-    "favorites" : [""]
+    "likes" : ["Action movies", "Arijit Singh Songs", "Plays BGMI", "Tech Geek", "Weekend hubs : Breweries and Cafes in Koramangala and Indiranagar "],
+    "dislikes" : [""]
 }
