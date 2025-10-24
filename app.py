@@ -8,6 +8,7 @@ import re
 import uvicorn
 from dotenv import load_dotenv
 from google import genai
+from fastapi import Query
 
 # ------------------ SETUP ------------------
 load_dotenv()
@@ -152,7 +153,7 @@ def classify_message(user_input, username):
     """
 
     raw = generate(prompt, "gemini-2.5-pro")
-    for label in ["suggestive", "discussive", "humorous", "help"]:
+    for label in ["suggestive", "discussive", "humorous"]:
         if label in raw.lower():
             return label
     return "discussive"
@@ -540,14 +541,89 @@ def signin(req: SigninRequest):
         raise HTTPException(status_code=401, detail="Invalid password")
     return {"success": True, "message": f"Welcome back {user['profile']['nickname']}!"}
 
+# @app.post("/chat")
+# def chat(req: ChatRequest):
+#     user = load_user(req.username)
+#     if not user:
+#         raise HTTPException(status_code=404, detail="User not found")
+
+#     reply, category = chatbot_reply(req.message, req.username)
+#     return {"reply": reply, "category": category}
+
+# @app.post("/chat")
+# def chat(req: ChatRequest):
+#     user = load_user(req.username)
+#     if not user:
+#         raise HTTPException(status_code=404, detail="User not found")
+
+#     reply, category = chatbot_reply(req.message, req.username)
+
+#     # ✅ Fetch last 10 conversations (of any category)
+#     convos = user.get("conversation_history", [])
+#     recent_10 = convos[-10:] if len(convos) > 10 else convos
+
+#     return {
+#         "reply": reply,
+#         "category": category,
+#         "recent_conversations": recent_10  # ✅ send this to frontend
+#     }
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     user = load_user(req.username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # ✅ If no message provided → just return last 10 chats
+    if not req.message or req.message.strip() == "":
+        convos = user.get("conversation_history", [])
+        recent_10 = convos[-10:] if len(convos) > 10 else convos
+        return {
+            "recent_conversations": recent_10,
+            "message": "Loaded previous chat history"
+        }
+
+    # ✅ Otherwise, process normally
     reply, category = chatbot_reply(req.message, req.username)
-    return {"reply": reply, "category": category}
+
+    # Fetch last 10 (after adding the new one)
+    user = load_user(req.username)  # reload because conversation updated
+    convos = user.get("conversation_history", [])
+    recent_10 = convos[-10:] if len(convos) > 10 else convos
+
+    return {
+        "reply": reply,
+        "category": category,
+        "recent_conversations": recent_10
+    }
+
+
+@app.get("/history")
+def get_history(username: str, offset: int = Query(0, ge=0), limit: int = Query(10, gt=0)):
+    """
+    Returns paginated conversation history for the given username.
+    offset = number of messages already loaded (start index from the end)
+    limit = how many messages to fetch (default 10)
+    """
+    user = load_user(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    convos = user.get("conversation_history", [])
+    total = len(convos)
+
+    # Fetch older messages starting from the end
+    start = max(total - offset - limit, 0)
+    end = total - offset
+    slice_data = convos[start:end]
+
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "conversations": slice_data
+    }
+
 
 @app.get("/")
 def root():
