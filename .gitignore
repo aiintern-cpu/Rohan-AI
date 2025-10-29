@@ -4,3 +4,6 @@ __pycache__/
 __pycache__/app.cpython-313.pyc
 .env
 database_obsolete/
+app_p1.py
+app_supabase.py
+gemini_usage_log.jsonl

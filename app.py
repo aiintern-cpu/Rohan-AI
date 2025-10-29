@@ -1,26 +1,38 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
+from dotenv import load_dotenv
+from supabase import create_client
+from google import genai
 import os
 import json
 import re
 import uvicorn
-from dotenv import load_dotenv
-from google import genai
-from fastapi import Query
 
 # ------------------ SETUP ------------------
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if genai and api_key else None
-DATABASE_DIR = "./database"
-os.makedirs(DATABASE_DIR, exist_ok=True)
-app = FastAPI(title="ROHAN")
+
+# Supabase setup
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Gemini setup
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY) if genai and GEMINI_API_KEY else None
+
+# Gemini usage log
+LOG_FILE = "gemini_usage_log.jsonl"
+ 
+# FastAPI setup
+app = FastAPI(title="Rohan - AI Companion")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ------------------ MODELS ------------------
@@ -40,104 +52,188 @@ class SigninRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     username: str
-    message: str
+    message: Optional[str] = ""
 
 # ------------------ UTILITIES ------------------
-def user_file(username):
-    safe = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", username)
-    return os.path.join(DATABASE_DIR, f"{safe}.json")
-
-def load_user(username):
-    path = user_file(username)
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_user(username, data):
-    with open(user_file(username), "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
 def generate(prompt, model="gemini-2.5-flash"):
     if not client:
         return "(Gemini not configured)"
     try:
         res = client.models.generate_content(model=model, contents=prompt)
+        # Log usage
+        usage = res.usage_metadata
+        prompt_tokens = usage.prompt_token_count
+        response_tokens = usage.candidates_token_count
+        total_tokens = usage.total_token_count
+        log_entry = {
+            "response": res.text.strip(),
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "response_tokens": response_tokens,
+            "total_tokens": total_tokens
+        }
+        with open(LOG_FILE, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
         return res.text.strip()
     except Exception as e:
         return f"(Error: {str(e)})"
+    
 
-# def add_conversation(username, role, message):
-#     user = load_user(username)
-#     user["conversation_history"].append({"role": role, "message": message})
-#     save_user(username, user)
+def clean_json_response(raw_text: str):
+    cleaned = re.sub(r"^(`{3,}|'{3,})\s*json\s*", "", raw_text.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"(`{3,}|'{3,})$", "", cleaned.strip())
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if match:
+        cleaned = match.group(0)
+    return cleaned
 
-def add_conversation(username, user_msg, bot_msg, category):
-    user = load_user(username)
-    user["conversation_history"].append({
-        "user": user_msg,
-        "rohan": bot_msg,
+# ------------------ DATABASE HELPERS ------------------
+def get_user(username: str):
+    res = supabase.table("auth_users").select("*").eq("username", username).execute()
+    if not res.data:
+        return None
+    return res.data[0]
+
+def get_profile(username: str):
+    res = supabase.table("user_profiles").select("*").eq("username", username).execute()
+    if not res.data:
+        return None
+    return res.data[0]
+
+def get_rohan_profile():
+    res = supabase.table("user_profiles").select("*").eq("username", "Rohan").execute()
+    if not res.data:
+        return None     
+    return res.data[0]
+
+def get_recent_history(username: str, limit: int = 10):
+    res = supabase.table("conversation_history").select("*") \
+        .or_(f"sender.eq.{username},receiver.eq.{username}") \
+        .order("timestamp", desc=True).limit(limit).execute()
+    recent_conversations = list(reversed(res.data))
+    return recent_conversations if res.data else []
+
+def add_conversation(sender, receiver, message, category):
+    supabase.table("conversation_history").insert({
+        "sender": sender,
+        "receiver": receiver,
+        "message": message,
         "category": category
-    })
-    save_user(username, user)
+    }).execute()
 
+def enrich_profile(username: str):
+    """Auto-extract likes/dislikes/major_evenst/minor_events/people from recent chats."""
+    # convos = get_recent_history(username, limit=15)
+    res = supabase.table("conversation_history").select("*") \
+        .eq("sender", username) \
+        .order("timestamp", desc=True).limit(15).execute()
+    convos = list(reversed(res.data))
+    profile = get_profile(username)
+    text = "\n".join([c["message"] for c in convos if "message" in c])
+    if not text:
+        return
 
-def get_recent_history(username, category):
-    user = load_user(username)
-    conversations = user["conversation_history"]
-    if category == "discussive":
-        limit = 12      
-    elif category == "suggestive":
-        limit = 8
-    elif category == "humorous":
-        limit = 6
-    elif category == "classify":
-        limit = 4
-    else:
-        limit = 0
+    extract_prompt = f"""You are an AI that analyzes conversations between a user and their AI companion to extract important personal information.
 
-    if limit > 0:
-        recent = conversations[-limit:]
-        lines = []
-        for c in recent:
-            user_msg = c.get("user", "")
-            rohan_msg = c.get("rohan", "")
-            lines.append(f"User: {user_msg}\nRohan: {rohan_msg}")
-        return "\n".join(lines)
-        # return "\n".join([f"{c['role'].capitalize()}: {c['message']}" for c in recent])
-    return ""
+    Task: Analyze the conversation log and extract a structured summary of key personal details.
 
-with open("bot_profile.json", "r", encoding="utf-8") as f:
-    BOT_PROFILE = json.load(f)
+    What to Extract:
 
-# ------------------ CLASSIFICATION ------------------
-def classify_message(user_input, username):
-    user = load_user(username)
-    profile = user["profile"]
+    1. likes: Things the user enjoys or loves
+    - Hobbies and activities (e.g., "painting", "hiking")
+    - Foods and restaurants (e.g., "biryani", "Truffles")
+    - Media (e.g., "Inception", "The Beatles", "Stranger Things")
+    - Brands, places, or anything they express positive sentiment about
 
+    2. dislikes: Things the user does not enjoy or loves
+    - Hobbies and activities (e.g., "painting", "hiking")
+    - Foods and restaurants (e.g., "biryani", "Truffles")
+    - Media (e.g., "Inception", "The Beatles", "Stranger Things")
+    - Brands, places, or anything they express negative sentiment about
+
+    3. major_ events: Significant life events or milestones mentioned
+    - Career changes (e.g., "started new job at Google")
+    - Life transitions (e.g., "moved to Bangalore", "graduated college")
+    - Important occasions (e.g., "sister's wedding", "promotion")
+    - Only include specific events, not general statements
+
+    4. minor_events: Smaller but notable events or experiences
+    - Daily life events (e.g., "went to a concert", "tried a new restaurant")
+    - Travel experiences (e.g., "visited Goa", "road trip to Mysore")
+    - Social activities (e.g., "hung out with friends", "family dinner")
+    - Only include specific events, not general statements
+
+    5. people: Names and relationships of people in their life
+    - Format: "Name (relationship)" (e.g., "Priya (sister)", "Alex (colleague)")
+    - Include family, friends, colleagues, partners
+    - Only include if both name AND relationship are mentioned
+
+    Extraction Rules:
+    - Only extract information explicitly stated in the conversation
+    - Don't infer or assume information not directly mentioned
+    - Use exact quotes or paraphrasing from the conversation
+    - If a category has no clear information, use an empty array []
+    - Maintain consistent formatting across all entries
+    - Remove duplicates
+
+    Output Format:
+    Return ONLY valid JSON with no additional text, explanations, or markdown:
+
+    {{
+    "likes": ["item1", "item2", "item3"],
+    "dislikes": ["item1", "item2", "item3"],
+    "major_events": ["event description 1", "event description 2"],
+    "minor_events": ["event description 1", "event description 2"],
+    "people": ["Name (relationship)", "Name (relationship)"]
+    }}
+
+    Conversation Log:
+    {text}
+
+    Extract and return JSON
+    """
+
+    result = generate(extract_prompt, "gemini-2.5-pro")
+    cleaned = clean_json_response(result)
+    try:
+        extracted = json.loads(cleaned)
+        profile = get_profile(username)
+        if not profile:
+            return
+
+        # Merge new items
+        for field in ["likes", "dislikes", "major_events", "minor_events", "people"]:
+            old_values = profile.get(field, [])
+            new_values = extracted.get(field, [])
+            merged = list(set(old_values + new_values))
+            profile[field] = merged
+
+        supabase.table("user_profiles").update(profile).eq("username", username).execute()
+    except Exception:
+        pass
+
+# ------------------ MESSAGE CLASSIFICATION ------------------
+def classify_message(user_input, profile, rohan_profile):
+    
     prompt = f"""You are analyzing user intent for a companion chatbot. Classify the message into exactly ONE category.
 
-    <Categories>
+    Categories :
     - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
     - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
     - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
-    </Categories>
 
-    <User Profile>
+    User Profile :
     Nickname: {profile['nickname']}
     Designation: {profile['designation']}
     Likes: {', '.join(profile['likes'])}
-    </User Profile>
+    Dislikes: {', '.join(profile['dislikes'])}
     
-    <Bot Profile>
-    Name: {BOT_PROFILE['name']}
-    Age: {BOT_PROFILE['age']}
-    Designation: {BOT_PROFILE['designation']}
-    Likes: {', '.join(BOT_PROFILE['likes'])}
-    </Bot Profile>
+    Bot Profile :
+    Nickname: {rohan_profile['nickname']}
+    Likes: {', '.join(rohan_profile['likes'])}
 
     <Recent Conversation Context>
-    {get_recent_history(username, 'classify')}
+    {get_recent_history(profile['nickname'], 4)}
     </Recent Conversation Context>
 
     User message : "{user_input}"
@@ -152,19 +248,16 @@ def classify_message(user_input, username):
     Return ONLY one word: Suggestive, Discussive, or Humorous
     """
 
-    raw = generate(prompt, "gemini-2.5-pro")
+    raw = generate(prompt)
     for label in ["suggestive", "discussive", "humorous"]:
         if label in raw.lower():
             return label
     return "discussive"
 
 # ------------------ RESPONSE GENERATORS ------------------
-def handle_suggestive(user_input, username):
-    user = load_user(username)
-    profile = user["profile"]
-    history = get_recent_history(username, "suggestive")
-
-    prompt = f"""You are Rohan.You are a supportive and knowledgeable friend. The user is seeking advice, recommendations, or suggestions.
+def handle_suggestive(user_input, profile, rohan_profile):
+    prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
+    You are a supportive and knowledgeable friend. The user is seeking advice, recommendations, or suggestions.
 
     <Your Role>
     - Provide practical, actionable advice tailored to their likes and background
@@ -172,7 +265,7 @@ def handle_suggestive(user_input, username):
     - Reference their likes and preferences when relevant
     - Offer 2-3 concrete suggestions or tips they can act on
     - Keep the message length depending on user message
-    - Keep responses concise but informative (20-30 words)
+    - Keep responses concise but informative (30-50 words)
     - Respond as a friendly human would, not a formal advisor
     </Your Role>
 
@@ -193,34 +286,31 @@ def handle_suggestive(user_input, username):
     Location: {profile['location']}
     Likes: {', '.join(profile['likes'])}
     Dislikes: {','.join(profile['dislikes'])}
-    Important Events: {', '.join(profile['events'])}
+    Major Events: {', '.join(profile['major_events'])}
+    Minor Events: {', '.join(profile['minor_events'])}
     Key People: {', '.join(profile['people'])}
     <User Profile>
     
     <Bot Profile>
-    Name: {BOT_PROFILE['name']}
-    Age: {BOT_PROFILE['age']}
-    Designation: {BOT_PROFILE['designation']}
-    Likes: {', '.join(BOT_PROFILE['likes'])}
+    Name: {rohan_profile['nickname']}
+    Age: {rohan_profile['age']}
+    Designation: {rohan_profile['designation']}
+    Likes: {', '.join(rohan_profile['likes'])}
     </Bot Profile>
 
     <Conversation History>
-    {history}
+    {get_recent_history(profile['nickname'], 6)}
     </Conversation History>
 
     User's Request: {user_input}
 
     Provide your helpful, personalized advice.
     """
-
     return generate(prompt)
 
-def handle_discussive(user_input, username):
-    user = load_user(username)
-    profile = user["profile"]
-    history = get_recent_history(username, "discussive")
-
-    prompt = f"""You are Rohan. You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
+def handle_discussive(user_input, profile, rohan_profile):
+    prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
+    You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
 
     <Your Approach>
     - Give chating style response - short, use acronyms
@@ -237,7 +327,7 @@ def handle_discussive(user_input, username):
     - Use their likes and background to personalize responses
     - Show you remember previous conversations
     - Balance listening with contributing meaningful thoughts
-    - Keep responses conversational (20-35 words)
+    - Keep responses conversational (40-50 words)
     - Don't force positivity if they're expressing difficult emotions
     - Do not respond in markdown format
 
@@ -248,30 +338,28 @@ def handle_discussive(user_input, username):
     Location: {profile['location']}
     Likes: {', '.join(profile['likes'])}
     Dislikes: {','.join(profile['dislikes'])}
-    Life Context: {', '.join(profile['events'])}
+    Life Context: {', '.join(profile['major_events'])}
     Important People: {', '.join(profile['people'])}
 
     Bot Profile:
-    Name: {BOT_PROFILE['name']}
-    Age: {BOT_PROFILE['age']}
-    Designation: {BOT_PROFILE['designation']}
-    Likes: {', '.join(BOT_PROFILE['likes'])}
+    Name: {rohan_profile['nickname']}
+    Age: {rohan_profile['age']}
+    Designation: {rohan_profile['designation']}
+    Likes: {', '.join(rohan_profile['likes'])}
+    Dislikes: {', '.join(rohan_profile['dislikes'])}
 
     Conversation History:
-    {history}
+    {get_recent_history(profile['nickname'], 10)}
 
     User's Message: {user_input}
 
     Respond with empathy and depth:
     """
-    return generate(prompt, "gemini-2.5-pro")
+    return generate(prompt)
 
-def handle_humorous(user_input, username):
-    user = load_user(username)
-    profile = user["profile"]
-    history = get_recent_history(username, "humorous")
-
-    prompt = f"""You are a witty, fun-loving friend with a Bangalore/Gen Z vibe. The user wants light-hearted, playful interaction.
+def handle_humorous(user_input, profile, rohan_profile):
+    prompt = f"""You are Rohan. Your Personality is ENTP type.
+    You are a witty, fun-loving friend with a Bangalore/Gen Z vibe. The user wants light-hearted, playful interaction.
 
     Your Humor Style:
     - Bangalore-flavored humor (traffic jokes, weather, local culture references when relevant) (Do NOT overdo it)
@@ -300,206 +388,47 @@ def handle_humorous(user_input, username):
     Location: {profile['location']}
     Likes: {', '.join(profile['likes'])}
     Dislikes: {','.join(profile['dislikes'])}
+    Major Events: {', '.join(profile['major_events'])}
     
     Bot Profile:
-    Name: {BOT_PROFILE['name']}
-    Age: {BOT_PROFILE['age']}
-    Designation: {BOT_PROFILE['designation']}
-    Likes: {', '.join(BOT_PROFILE['likes'])}
+    Name: {rohan_profile['name']}
+    Age: {rohan_profile['age']}
+    Designation: {rohan_profile['designation']}
+    Likes: {', '.join(rohan_profile['likes'])}
+    Dislikes: {', '.join(rohan_profile['dislikes'])}
 
     Recent Chat:
-    {history}
+    {get_recent_history(profile['nickname'], 3)}
 
     User's Message: {user_input}
 
     Bring the fun."""
     return generate(prompt)
 
-# def handle_help(user_input, username):
-#     user = load_user(username)
-#     profile = user["profile"]
-#     prompt = f"""The user may be experiencing distress or emotional difficulty. Respond with care, empathy, and appropriate resources.
-
-#     Your Response Structure:
-#     1. Immediate Acknowledgment - Validate their feelings without judgment
-#     2. Express Support - Let them know you're here and they're not alone
-#     3. Provide Resources - Share professional helplines appropriate for their situation
-#     4. Set Boundaries - Gently clarify what you can and cannot do
-#     5. Encourage Action - Suggest next steps for getting proper help
-
-#     Important Guidelines:
-#     - Use warm, non-judgmental language
-#     - Take any mention of self-harm or crisis seriously
-#     - Don't minimize their feelings with toxic positivity
-#     - Never provide medical, psychiatric, or legal advice
-#     - Keep response brief but comprehensive (3-4 sentences)
-#     - Show you care while maintaining appropriate boundaries
-
-#     Professional Resources to Share: (Only if you think it is crucial)
-#     - AASRA: 91-9820466726 (24/7 crisis helpline)
-#     - Vandrevala Foundation: 1860-2662-345 (mental health support)
-#     - iCall: 9152987821 (psychosocial helpline)
-#     - NIMHANS: 080-46110007 (Bangalore-based mental health)
-
-#     User Information:
-#     Nickname: {profile['nickname']}
-
-#     User's Message: {user_input}
-
-#     Respond with compassion and appropriate support.
-#     """
-#     return generate(prompt)
-
-# # ------------------ PROFILE ENRICHMENT ------------------
-# def enrich_profile(username):
-#     user = load_user(username)
-#     convos = user["conversation_history"]
-#     text = "\n".join([f"{c['role']}: {c['message']}" for c in convos])
-
-#     extract_prompt = f"""
-#     You are an AI that analyzes user conversations.
-#     Extract a summary in pure JSON format:
-#     {{
-#         "favorites": [things or activities user enjoys],
-#         "events": [important life events mentioned],
-#         "people": [names or relationships mentioned]
-#     }}
-#     Only return valid JSON.
-#     Conversation log:
-#     {text}
-#     """
-
-#     result = generate(extract_prompt)
-#     try:
-#         extracted = json.loads(result)
-#         for key in ["favorites", "events", "people"]:
-#             if key in extracted:
-#                 existing = user["profile"].get(key, [])
-#                 user["profile"][key] = list(set(existing + extracted[key]))
-#         save_user(username, user)
-#     except Exception:
-#         pass
-
-# ------------------ JSON CLEANING ------------------
-def clean_json_response(raw_text: str):
-    """
-    Cleans Gemini's response so only the pure JSON remains.
-    Removes markdown/code block wrappers like ```json, '''json, etc.
-    """
-    # Remove leading/trailing code fences and text like ```json or '''json
-    cleaned = re.sub(r"^(`{3,}|'{3,})\s*json\s*", "", raw_text.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"(`{3,}|'{3,})$", "", cleaned.strip())
-
-    # Optionally remove any prefix text before the first { and after last }
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if match:
-        cleaned = match.group(0)
-
-    return cleaned
-
-# ------------------ PROFILE ENRICHMENT ------------------
-def enrich_profile(username):
-    user = load_user(username)
-    convos = user["conversation_history"]
-    # print(f"Convos: \n{convos}")
-    # user_msgs = [c for c in convos if c["role"] == "user"]
-    user_msgs = [c["user"] for c in convos if "user" in c]
-    # ✅ Only consider the last 15 messages
-    # recent_convos = user_msgs[-15:] if len(user_msgs) > 15 else convos
-    # text = "\n".join([f"{c['role']}: {c['message']}" for c in recent_convos])
-    recent_convos = user_msgs[-15:] if len(user_msgs) > 15 else user_msgs
-    text = "\n".join(recent_convos)
-
-    extract_prompt = f"""You are an AI that analyzes conversations between a user and their AI companion to extract important personal information.
-
-    Task: Analyze the conversation log and extract a structured summary of key personal details.
-
-    What to Extract:
-
-    1. likes: Things the user enjoys or loves
-    - Hobbies and activities (e.g., "painting", "hiking")
-    - Foods and restaurants (e.g., "biryani", "Truffles")
-    - Media (e.g., "Inception", "The Beatles", "Stranger Things")
-    - Brands, places, or anything they express positive sentiment about
-
-    2. dislikes: Things the user does not enjoy or loves
-    - Hobbies and activities (e.g., "painting", "hiking")
-    - Foods and restaurants (e.g., "biryani", "Truffles")
-    - Media (e.g., "Inception", "The Beatles", "Stranger Things")
-    - Brands, places, or anything they express negative sentiment about
-
-    3. events: Significant life events or milestones mentioned
-    - Career changes (e.g., "started new job at Google")
-    - Life transitions (e.g., "moved to Bangalore", "graduated college")
-    - Important occasions (e.g., "sister's wedding", "promotion")
-    - Only include specific events, not general statements
-
-    4. people: Names and relationships of people in their life
-    - Format: "Name (relationship)" (e.g., "Priya (sister)", "Alex (colleague)")
-    - Include family, friends, colleagues, partners
-    - Only include if both name AND relationship are mentioned
-
-    Extraction Rules:
-    - Only extract information explicitly stated in the conversation
-    - Don't infer or assume information not directly mentioned
-    - Use exact quotes or paraphrasing from the conversation
-    - If a category has no clear information, use an empty array []
-    - Maintain consistent formatting across all entries
-    - Remove duplicates
-
-    Output Format:
-    Return ONLY valid JSON with no additional text, explanations, or markdown:
-
-    {{
-    "likes": ["item1", "item2", "item3"],
-    "dislikes": ["item1", "item2", "item3"],
-    "events": ["event description 1", "event description 2"],
-    "people": ["Name (relationship)", "Name (relationship)"]
-    }}
-
-    Conversation Log:
-    {text}
-
-    Extract and return JSON
-    """
-
-    result = generate(extract_prompt, "gemini-2.5-pro")
-    # print(f"Enrichment result: {result}")
-    result = clean_json_response(result)
-    print(f"Cleaned JSON: {result}")
-    try:
-        extracted = json.loads(result)
-        for key in ["lieks", "dislikes", "events", "people"]:
-            if key in extracted:
-                existing = user["profile"].get(key, [])
-                user["profile"][key] = list(set(existing + extracted[key]))
-        save_user(username, user)
-    except Exception:
-        pass  # Ignore JSON parsing errors silently
-
-# ------------------ CHATBOT MAIN LOGIC ------------------
+# ------------------ CHATBOT LOGIC ------------------
 def chatbot_reply(user_input, username):
-    category = classify_message(user_input, username)
+    profile = get_profile(username)
+    rohan_profile = get_rohan_profile()
+    if not profile:
+        raise HTTPException(status_code=404, detail="User profile not found")
+
+    category = classify_message(user_input, profile, rohan_profile)
 
     if category == "suggestive":
-        reply = handle_suggestive(user_input, username)
+        reply = handle_suggestive(user_input, profile, rohan_profile)
     elif category == "discussive":
-        reply = handle_discussive(user_input, username)
+        reply = handle_discussive(user_input, profile, rohan_profile)
     elif category == "humorous":
-        reply = handle_humorous(user_input, username)
+        reply = handle_humorous(user_input, profile, rohan_profile)
     else:
-        reply = "I'm here for you 😊 tell me more?"
+        reply = "I'm here for you 😊 tell me more" 
 
-    # add_conversation(username, "user", user_input)
-    # add_conversation(username, "bot", reply)
+    add_conversation(username, "Rohan", user_input, "user input")
+    add_conversation("Rohan", username, reply, category)
 
-    add_conversation(username, user_input, reply, category)
-
-    # Check message count for enrichment
-    user = load_user(username)
-    # user_msg_count = sum(1 for m in user["conversation_history"] if m["role"] == "user")
-    user_msg_count = sum(1 for m in user["conversation_history"])
-    if user_msg_count % 15 == 0:
+    # Enrich profile every 15 messages
+    total = supabase.table("conversation_history").select("id", count="exact").eq("sender", username).execute()
+    if total.count and total.count % 15 == 0:
         enrich_profile(username)
 
     return reply, category
@@ -507,127 +436,77 @@ def chatbot_reply(user_input, username):
 # ------------------ ROUTES ------------------
 @app.post("/signup")
 def signup(req: SignupRequest):
-    path = user_file(req.username)
-    if os.path.exists(path):
+    # Check if user exists
+    existing = supabase.table("auth_users").select("*").eq("username", req.username).execute()
+    if existing.data:
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    user_data = {
-        "credentials": {
-            "username": req.username,
-            "email": req.email,
-            "password": req.password
-        },
-        "profile": {
-            "nickname": req.nickname,
-            "age": req.age,
-            "designation": req.designation,
-            "location": req.location,
-            "likes": req.likes,
-            "dislikes": [],
-            "events": [],
-            "people": []
-        },
-        "conversation_history": []
-    }
-    save_user(req.username, user_data)
+    # Insert into auth_users
+    supabase.table("auth_users").insert({
+        "username": req.username,
+        "email": req.email,
+        "password": req.password
+    }).execute()
+
+    # Insert profile
+    supabase.table("user_profiles").insert({
+        "username": req.username,
+        "nickname": req.nickname,
+        "age": req.age,
+        "designation": req.designation,
+        "location": req.location,
+        "likes": req.likes,
+        "dislikes": [],
+        "major_events": [],
+        "minor_events": [],
+        "extra": {}
+    }).execute()
+
     return {"message": f"User {req.username} registered successfully"}
 
 @app.post("/signin")
 def signin(req: SigninRequest):
-    user = load_user(req.username)
+    user = get_user(req.username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user["credentials"]["password"] != req.password:
+    if user["password"] != req.password:
         raise HTTPException(status_code=401, detail="Invalid password")
-    return {"success": True, "message": f"Welcome back {user['profile']['nickname']}!"}
-
-# @app.post("/chat")
-# def chat(req: ChatRequest):
-#     user = load_user(req.username)
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     reply, category = chatbot_reply(req.message, req.username)
-#     return {"reply": reply, "category": category}
-
-# @app.post("/chat")
-# def chat(req: ChatRequest):
-#     user = load_user(req.username)
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     reply, category = chatbot_reply(req.message, req.username)
-
-#     # ✅ Fetch last 10 conversations (of any category)
-#     convos = user.get("conversation_history", [])
-#     recent_10 = convos[-10:] if len(convos) > 10 else convos
-
-#     return {
-#         "reply": reply,
-#         "category": category,
-#         "recent_conversations": recent_10  # ✅ send this to frontend
-#     }
+    return {"success": True, "message": f"Welcome back {req.username}!"}
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    user = load_user(req.username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # ✅ If no message provided → just return last 10 chats
-    if not req.message or req.message.strip() == "":
-        convos = user.get("conversation_history", [])
-        recent_10 = convos[-10:] if len(convos) > 10 else convos
-        return {
-            "recent_conversations": recent_10,
-            "message": "Loaded previous chat history"
-        }
-
-    # ✅ Otherwise, process normally
+    if not req.username:
+        raise HTTPException(status_code=400, detail="Username required")
+    
     reply, category = chatbot_reply(req.message, req.username)
-
-    # Fetch last 10 (after adding the new one)
-    user = load_user(req.username)  # reload because conversation updated
-    convos = user.get("conversation_history", [])
-    recent_10 = convos[-10:] if len(convos) > 10 else convos
-
-    return {
-        "reply": reply,
-        "category": category,
-        "recent_conversations": recent_10
-    }
-
+    return {"reply": reply}
 
 @app.get("/history")
-def get_history(username: str, offset: int = Query(0, ge=0), limit: int = Query(10, gt=0)):
-    """
-    Returns paginated conversation history for the given username.
-    offset = number of messages already loaded (start index from the end)
-    limit = how many messages to fetch (default 10)
-    """
-    user = load_user(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+def history(username: str, offset: int = Query(0, ge=0), limit: int = Query(20, gt=0)):
+    try:
+        print(f"Fetching history for user: {username}") # Add logging
 
-    convos = user.get("conversation_history", [])
-    total = len(convos)
+        res = supabase.table("conversation_history").select("*") \
+            .or_(f"sender.eq.{username},receiver.eq.{username}") \
+            .order("timestamp", desc=True) \
+            .range(offset, offset + limit - 1) \
+            .execute()
+        recent_conversations = list(reversed(res.data))
+        conversations = recent_conversations if res.data else []
+        return {
+            "total": len(conversations),
+            "offset": offset,
+            "limit": limit,
+            "conversations": conversations
+        }
 
-    # Fetch older messages starting from the end
-    start = max(total - offset - limit, 0)
-    end = total - offset
-    slice_data = convos[start:end]
-
-    return {
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "conversations": slice_data
-    }
-
+    except Exception as e:
+        print(f"!!! ERROR in /history endpoint: {e}") # Log unexpected errors
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def root():
-    return {"message": "Rohan - AI Companion"}
+    return {"message": "Rohan - AI"}
 
 # ------------------ RUN ------------------
 if __name__ == "__main__":
