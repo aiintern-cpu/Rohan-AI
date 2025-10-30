@@ -391,7 +391,7 @@ def handle_humorous(user_input, profile, rohan_profile):
     Major Events: {', '.join(profile['major_events'])}
     
     Bot Profile:
-    Name: {rohan_profile['name']}
+    Name: {rohan_profile['nickname']}
     Age: {rohan_profile['age']}
     Designation: {rohan_profile['designation']}
     Likes: {', '.join(rohan_profile['likes'])}
