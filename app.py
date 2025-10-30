@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ import os
 import json
 import re
 import uvicorn
+import asyncio
 
 # ------------------ SETUP ------------------
 load_dotenv()
@@ -121,7 +123,7 @@ def add_conversation(sender, receiver, message, category):
         "category": category
     }).execute()
 
-def enrich_profile(username: str):
+async def enrich_profile(username: str):
     """Auto-extract likes/dislikes/major_evenst/minor_events/people from recent chats."""
     # convos = get_recent_history(username, limit=15)
     res = supabase.table("conversation_history").select("*") \
@@ -195,6 +197,7 @@ def enrich_profile(username: str):
 
     result = generate(extract_prompt, "gemini-2.5-pro")
     cleaned = clean_json_response(result)
+    # print(f"Enrichment raw result: {cleaned}")  # Debug log
     try:
         extracted = json.loads(cleaned)
         profile = get_profile(username)
@@ -296,6 +299,8 @@ def handle_suggestive(user_input, profile, rohan_profile):
     Age: {rohan_profile['age']}
     Designation: {rohan_profile['designation']}
     Likes: {', '.join(rohan_profile['likes'])}
+    Life Events: {', '.join(rohan_profile['major_events'])}
+    Important People: {', '.join(rohan_profile['people'])}
     </Bot Profile>
 
     <Conversation History>
@@ -347,6 +352,8 @@ def handle_discussive(user_input, profile, rohan_profile):
     Designation: {rohan_profile['designation']}
     Likes: {', '.join(rohan_profile['likes'])}
     Dislikes: {', '.join(rohan_profile['dislikes'])}
+    Life Events: {', '.join(rohan_profile['major_events'])}
+    Important People: {', '.join(rohan_profile['people'])}
 
     Conversation History:
     {get_recent_history(profile['nickname'], 10)}
@@ -427,10 +434,9 @@ def chatbot_reply(user_input, username):
     add_conversation("Rohan", username, reply, category)
 
     # Enrich profile every 15 messages
-    total = supabase.table("conversation_history").select("id", count="exact").eq("sender", username).execute()
-    if total.count and total.count % 15 == 0:
-        enrich_profile(username)
-
+    # total = supabase.table("conversation_history").select("id", count="exact").eq("sender", username).execute()
+    # if total.count and total.count % 15 == 0:
+    #     enrich_profile(username)
     return reply, category
 
 # ------------------ ROUTES ------------------
@@ -474,11 +480,17 @@ def signin(req: SigninRequest):
     return {"success": True, "message": f"Welcome back {req.username}!"}
 
 @app.post("/chat")
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
     if not req.username:
         raise HTTPException(status_code=400, detail="Username required")
     
     reply, category = chatbot_reply(req.message, req.username)
+    total = supabase.table("conversation_history").select("id", count="exact").eq("sender", req.username).execute()
+    # Enrich profile every 15 messages
+    if total.count and total.count % 15 == 0:
+        print(f"Enriching profile for user: {req.username}") # Add logging
+        asyncio.create_task(enrich_profile(req.username))
+
     return {"reply": reply}
 
 @app.get("/history")
