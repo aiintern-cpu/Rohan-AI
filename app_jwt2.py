@@ -205,24 +205,24 @@ def create_user_profile_tx(tx, user_data: Dict[str, Any]):
 #     print("Running create_user_profile_tx with query:", query)
 #     tx.run(query, **user_data)
 
-def get_user_profile_tx(tx, username: str):
-    query = """
-    MATCH (u:User {username: $username})
-    OPTIONAL MATCH (u)-[:LIKES]->(l:Interest)
-    OPTIONAL MATCH (u)-[:DISLIKES]->(d:Interest)
-    OPTIONAL MATCH (u)-[:HAS_EVENT]->(e:Event)
-    OPTIONAL MATCH (u)-[:KNOWS]->(p:Person)
-    RETURN u.username AS username,
-           u.nickname AS nickname,
-           u.age AS age,
-           u.job AS job,
-           u.location AS location,
-           collect(DISTINCT {name: l.name, type: l.type}) AS likes,
-           collect(DISTINCT {name: d.name, type: d.type}) AS dislikes,
-           collect(DISTINCT {event_name: e.name, description: e.description}) AS major_events,
-           collect(DISTINCT {name: p.name, relationship: p.relationship}) AS people
-    """
-    return tx.run(query, username=username).single()
+# def get_user_profile_tx(tx, username: str):
+#     query = """
+#     MATCH (u:User {username: $username})
+#     OPTIONAL MATCH (u)-[:LIKES]->(l:Interest)
+#     OPTIONAL MATCH (u)-[:DISLIKES]->(d:Interest)
+#     OPTIONAL MATCH (u)-[:HAS_EVENT]->(e:Event)
+#     OPTIONAL MATCH (u)-[:KNOWS]->(p:Person)
+#     RETURN u.username AS username,
+#            u.nickname AS nickname,
+#            u.age AS age,
+#            u.job AS job,
+#            u.location AS location,
+#            collect(DISTINCT {name: l.name, type: l.type}) AS likes,
+#            collect(DISTINCT {name: d.name, type: d.type}) AS dislikes,
+#            collect(DISTINCT {event_name: e.name, description: e.description}) AS major_events,
+#            collect(DISTINCT {name: p.name, relationship: p.relationship}) AS people
+#     """
+#     return tx.run(query, username=username).single()
 
 def extract_additional_details(info_list: List[str], username: str) -> Dict[str, Any]:
     """
