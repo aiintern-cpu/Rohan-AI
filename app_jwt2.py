@@ -59,7 +59,7 @@ class SignupRequest(BaseModel):
     password: str
     nickname: str
     age: int
-    designation: str
+    job: str
     location: str
     likes: List[str] = Field(default_factory=list)
 
@@ -160,29 +160,50 @@ def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return payload
 
-
+# u.job = $job,
+#         u.location = $location
 # ------------------ NEO4J CYLPHER HELPERS ------------------
 def create_user_profile_tx(tx, user_data: Dict[str, Any]):
     print("user_data in create_user_profile_tx:", user_data)
     query = """
-    MERGE (u:User {username: $username})
-    SET u.nickname = $nickname,
-        u.age = $age,
-        u.designation = $designation,
-        u.location = $location
+    MERGE (u:User {name: $username})
+    SET u.nickname = $nickname
+    SET u.age = $age
     WITH u
-    UNWIND $likes AS like
-      MERGE (i:Interest {name: like.name})
-      SET i.type = like.type
-      MERGE (u)-[:LIKES]->(i)
+    MERGE (j:JOB {name: $job})
+    MERGE (u)-[:WORKS_AS]->(j)
+    MERGE (l:LOCATION {name: $location})
+    MERGE (u)-[:LIVES_IN]->(l)
+
     WITH u
-    UNWIND $dislikes AS dislike
-      MERGE (d:Interest {name: dislike.name})
-      SET d.type = dislike.type
-      MERGE (u)-[:DISLIKES]->(d)
+    UNWIND $likes AS likeName
+        MERGE (i:Interest {name: likeName})
+        MERGE (u)-[:LIKES]->(i)
     """
-    print("Running create_user_profile_tx with query:", query)
     tx.run(query, **user_data)
+
+# def create_user_profile_tx(tx, user_data: Dict[str, Any]):
+#     print("user_data in create_user_profile_tx:", user_data)
+#     query = """
+#     MERGE (u:User {name: $username})
+#     SET u.nickname = $nickname,
+#         u.age = $age,
+#     WITH u
+#     MERGE (j:JOB {name: $job})
+#     MERGE (u)-[:WORKS_AS]->(j)
+#     MERGE (l:LOCATION {name: $location})
+#     MERGE (u)-[:LIVES_IN]->(l)
+#     UNWIND $likes AS likeName
+#       MERGE (i:Interest {name: likeName})
+#       MERGE (u)-[:LIKES]->(i)
+#     WITH u
+#     UNWIND $dislikes AS dislike
+#       MERGE (d:Interest {name: dislike.name})
+#       SET d.type = dislike.type
+#       MERGE (u)-[:DISLIKES]->(d)
+#     """
+#     print("Running create_user_profile_tx with query:", query)
+#     tx.run(query, **user_data)
 
 def get_user_profile_tx(tx, username: str):
     query = """
@@ -194,7 +215,7 @@ def get_user_profile_tx(tx, username: str):
     RETURN u.username AS username,
            u.nickname AS nickname,
            u.age AS age,
-           u.designation AS designation,
+           u.job AS job,
            u.location AS location,
            collect(DISTINCT {name: l.name, type: l.type}) AS likes,
            collect(DISTINCT {name: d.name, type: d.type}) AS dislikes,
@@ -203,93 +224,217 @@ def get_user_profile_tx(tx, username: str):
     """
     return tx.run(query, username=username).single()
 
-def update_user_profile_tx(tx, username: str, update_payload: Dict[str, Any]):
+def extract_additional_details(info_list: List[str], username: str) -> Dict[str, Any]:
     """
-    Safely updates Neo4j User node and related nodes.
-    Compatible with Gemini enrichment JSON format.
+    For every item like PERSON_RAMESH, LOCATION_MYSORE, SKILL_PYTHON:
+    - Find the node
+    - Retrieve ALL connected nodes + relationship types (both directions)
+    - Return them in grouped form
     """
-    set_parts = []
-    params = {"username": username}
+    result = {}
+    if not info_list:
+        return result
 
-    # --- Scalar properties (User node) ---
-    for key in ["nickname", "age", "designation", "location"]:
-        val = update_payload.get(key)
-        if val not in [None, "", []]:
-            set_parts.append(f"u.{key} = ${key}")
-            params[key] = val
+    with driver.session(database=NEO4J_DB) as session:
 
-    set_clause = "SET " + ", ".join(set_parts) if set_parts else ""
+        for item in info_list:
+            try:
+                ntype, name = item.split("_", 1)
+            except:
+                continue
 
-    # --- Start query ---
-    query = f"""
-    MATCH (u:User {{username: $username}})
-    {set_clause}
+            query = f"""
+            MATCH (u:User {{username: $username}})
+            OPTIONAL MATCH (u)-[r1]->(n)
+            MATCH (n:{ntype} {{name: $name}})
+            OPTIONAL MATCH (n)-[r]->(nbr)
+            OPTIONAL MATCH (nbr2)-[r2]->(n)
+            RETURN
+                COLLECT(DISTINCT {{
+                    name: n.name,
+                    neighbors_out: CASE WHEN nbr IS NULL THEN [] ELSE COLLECT(DISTINCT {{
+                        name: nbr.name,
+                        type: labels(nbr)[0],
+                        relation: type(r)
+                    }}) END,
+                    neighbors_in: CASE WHEN nbr2 IS NULL THEN [] ELSE COLLECT(DISTINCT {{
+                        name: nbr2.name,
+                        type: labels(nbr2)[0],
+                        relation: type(r2)
+                    }}) END
+                }}) AS full
+            """
+            query = f"""
+            MATCH (u:USER {{name: $username}})
+            MATCH (u)-[r1]-(n:{ntype} {{name: $name}})
+            OPTIONAL MATCH (n)-[r]->(nbr)
+            OPTIONAL MATCH (nbr2)-[r2]->(n)
+            WITH n,
+                collect(DISTINCT {{ 
+                    name: nbr.name, 
+                    type: labels(nbr)[0], 
+                    relation: type(r)
+                }}) AS neighbors_out,
+                collect(DISTINCT {{ 
+                    name: nbr2.name, 
+                    type: labels(nbr2)[0], 
+                    relation: type(r2)
+                }}) AS neighbors_in
+            RETURN {{  
+                name: n.name,
+                neighbors_out: neighbors_out,
+                neighbors_in: neighbors_in
+            }} AS full;
+
+            """
+            rec = session.run(query, username=username, name=name.upper()).single()
+
+            if rec and rec.get("full"):
+                node_data = rec["full"]  # first entry
+
+                # merge outgoing + incoming relations
+                all_neighbors = (node_data.get("neighbors_out", []) + node_data.get("neighbors_in", []))
+
+                result.setdefault(ntype, []).append({
+                    "name": name.upper(),
+                    "neighbors": all_neighbors
+                })
+
+    return result   
+
+def process_payload(tx, parent_node: Dict[str, str] | None, payload: Dict[str, Any]):
     """
+    Recursively process a nested payload and insert nodes + relationships into Neo4j.
+    parent_node: dict like {"type": "USER", "name": "SUNIDHI"}
+    payload: nested JSON describing graph relations
+    """
+    for key, value in payload.items():
+        # Split key into node type and name
+        try:
+            node_type, node_name = key.split("_", 1)
+        except ValueError:
+            print(f"⚠️ Skipping malformed key: {key}")
+            continue
 
-    # --- Likes ---
-    if update_payload.get("likes"):
-        valid_likes = [l for l in update_payload["likes"] if l.get("name")]
-        if valid_likes:
-            query += """
-            WITH u
-            FOREACH (like IN $likes |
-                MERGE (i:Interest {name: like.name})
-                SET i.type = like.type
-                MERGE (u)-[:LIKES]->(i)
-            )
-            """
-            params["likes"] = valid_likes
+        # Ensure node exists
+        tx.run(f"MERGE (n:{node_type} {{name: $name}})", name=node_name)
 
-    # --- Dislikes ---
-    if update_payload.get("dislikes"):
-        valid_dislikes = [d for d in update_payload["dislikes"] if d.get("name")]
-        if valid_dislikes:
-            query += """
-            WITH u
-            FOREACH (dislike IN $dislikes |
-                MERGE (d:Interest {name: dislike.name})
-                SET d.type = dislike.type
-                MERGE (u)-[:DISLIKES]->(d)
-            )
-            """
-            params["dislikes"] = valid_dislikes
+        # Handle simple relationship: (parent) -[:RELATION]-> (current)
+        if isinstance(value, str):
+            # Primary relationship case
+            if parent_node:
+                rel = value.upper()
+                query = f"""
+                MATCH (p:{parent_node['type']} {{name: $pname}}),
+                    (c:{node_type} {{name: $cname}})
+                MERGE (p)-[:{rel}]->(c)
+                """
+                tx.run(query, pname=parent_node["name"], cname=node_name)
 
-    # --- Major Events ---
-    if update_payload.get("major_events"):
-        valid_events = [e for e in update_payload["major_events"] if e.get("event_name")]
-        if valid_events:
-            query += """
-            WITH u
-            FOREACH (ev IN $major_events |
-                MERGE (e:Event {name: ev.event_name})
-                SET e.description = ev.description
-                MERGE (u)-[:HAS_EVENT]->(e)
-            )
-            """
-            params["major_events"] = valid_events
+        # Handle nested relationships (secondary / deeper)
+        elif isinstance(value, dict):
+            # If this dict has a direct relationship field like "_REL"
+            rel = value.get("_REL")
+            if rel and parent_node:
+                rel = rel.upper()
+                query = f"""
+                MATCH (p:{parent_node['type']} {{name: $pname}}),
+                    (c:{node_type} {{name: $cname}})
+                MERGE (p)-[:{rel}]->(c)
+                """
+                tx.run(query, pname=parent_node["name"], cname=node_name)
 
-    # --- People ---
-    if update_payload.get("people"):
-        valid_people = [p for p in update_payload["people"] if p.get("name")]
-        if valid_people:
-            query += """
-            WITH u
-            FOREACH (person IN $people |
-                MERGE (p:Person {name: person.name})
-                SET p.relationship = person.relationship
-                MERGE (u)-[:KNOWS]->(p)
-            )
-            """
-            params["people"] = valid_people
+            # Continue recursion for nested relationships (excluding "_REL")
+            nested_dict = {k: v for k, v in value.items() if k != "_REL"}
+            process_payload(tx, {"type": node_type, "name": node_name}, nested_dict)
 
-    query += "\nRETURN count(u) AS updated;"
+# def update_user_profile_tx(tx, username: str, update_payload: Dict[str, Any]):
+#     """
+#     Safely updates Neo4j User node and related nodes.
+#     Compatible with Gemini enrichment JSON format.
+#     """
+#     set_parts = []
+#     params = {"username": username}
 
-    print("🚀 Running update_user_profile_tx Cypher:")
-    print(query)
-    print("Params:", json.dumps(params, indent=2, default=str))
+#     # --- Scalar properties (User node) ---
+#     for key in ["nickname", "age", "job", "location"]:
+#         val = update_payload.get(key)
+#         if val not in [None, "", []]:
+#             set_parts.append(f"u.{key} = ${key}")
+#             params[key] = val
 
-    tx.run(query, **params)
-    print(f"✅ Profile updated in Neo4j for {username}")
+#     set_clause = "SET " + ", ".join(set_parts) if set_parts else ""
+
+#     # --- Start query ---
+#     query = f"""
+#     MATCH (u:User {{username: $username}})
+#     {set_clause}
+#     """
+
+#     # --- Likes ---
+#     if update_payload.get("likes"):
+#         valid_likes = [l for l in update_payload["likes"] if l.get("name")]
+#         if valid_likes:
+#             query += """
+#             WITH u
+#             FOREACH (like IN $likes |
+#                 MERGE (i:Interest {name: like.name})
+#                 SET i.type = like.type
+#                 MERGE (u)-[:LIKES]->(i)
+#             )
+#             """
+#             params["likes"] = valid_likes
+
+#     # --- Dislikes ---
+#     if update_payload.get("dislikes"):
+#         valid_dislikes = [d for d in update_payload["dislikes"] if d.get("name")]
+#         if valid_dislikes:
+#             query += """
+#             WITH u
+#             FOREACH (dislike IN $dislikes |
+#                 MERGE (d:Interest {name: dislike.name})
+#                 SET d.type = dislike.type
+#                 MERGE (u)-[:DISLIKES]->(d)
+#             )
+#             """
+#             params["dislikes"] = valid_dislikes
+
+#     # --- Major Events ---
+#     if update_payload.get("major_events"):
+#         valid_events = [e for e in update_payload["major_events"] if e.get("event_name")]
+#         if valid_events:
+#             query += """
+#             WITH u
+#             FOREACH (ev IN $major_events |
+#                 MERGE (e:Event {name: ev.event_name})
+#                 SET e.description = ev.description
+#                 MERGE (u)-[:HAS_EVENT]->(e)
+#             )
+#             """
+#             params["major_events"] = valid_events
+
+#     # --- People ---
+#     if update_payload.get("people"):
+#         valid_people = [p for p in update_payload["people"] if p.get("name")]
+#         if valid_people:
+#             query += """
+#             WITH u
+#             FOREACH (person IN $people |
+#                 MERGE (p:Person {name: person.name})
+#                 SET p.relationship = person.relationship
+#                 MERGE (u)-[:KNOWS]->(p)
+#             )
+#             """
+#             params["people"] = valid_people
+
+#     query += "\nRETURN count(u) AS updated;"
+
+#     print("🚀 Running update_user_profile_tx Cypher:")
+#     print(query)
+#     print("Params:", json.dumps(params, indent=2, default=str))
+
+#     tx.run(query, **params)
+#     print(f"✅ Profile updated in Neo4j for {username}")
 
 # ------------------ SUPABASE HELPERS ------------------
 def get_user(username: str) -> Optional[Dict[str, Any]]:
@@ -322,72 +467,115 @@ def add_conversation(sender: str, receiver: str, message: str, category: str):
 # ------------------ NEO4J PROFILE CRUD ------------------
 def create_profile_in_neo4j(user_dict: Dict[str, Any]):
     print("Creating profile in Neo4j for user_dict:", user_dict)
-    likes = [{"name": l, "type": ""} for l in user_dict.get("likes", [])]
-    dislikes = [{"name": d, "type": ""} for d in user_dict.get("dislikes", [])]
+    # likes = [{"name": l, "type": ""} for l in user_dict.get("likes", [])]
+    # dislikes = [{"name": d, "type": ""} for d in user_dict.get("dislikes", [])]
     payload = {
         "username": user_dict["username"],
         "nickname": user_dict["nickname"],
         "age": user_dict["age"],
-        "designation": user_dict["designation"],
+        "job": user_dict["job"],
         "location": user_dict["location"],
-        "likes": likes,
-        "dislikes": dislikes
+        "likes": user_dict.get("likes",[]),
+        "dislikes": user_dict.get("dislikes", [])
     }
     with driver.session(database=NEO4J_DB) as session:
         print("Payload for create_profile_in_neo4j:", payload)
         session.execute_write(create_user_profile_tx, payload)
         print("✅ User profile created in Neo4j!")
 
-def get_profile(username: str) -> Optional[Dict[str, Any]]: 
-    with driver.session(database=NEO4J_DB) as session:
-        rec = session.execute_read(get_user_profile_tx, username)
-        if not rec:
-            return None
-        def _normalize_list_of_maps(val):
-            if not val:
-                return []
-            normalized = []
-            for item in val:
-                if hasattr(item, "items"):
-                    normalized.append(dict(item))
-                else:
-                    normalized.append(item)
-            return normalized
-        likes = _normalize_list_of_maps(rec["likes"])
-        dislikes = _normalize_list_of_maps(rec["dislikes"])
-        major_events = _normalize_list_of_maps(rec["major_events"])
-        people_maps = _normalize_list_of_maps(rec["people"])
-        people = []
-        for p in people_maps:
-            name = p.get("name") if isinstance(p, dict) else None
-            rel = p.get("relationship") if isinstance(p, dict) else ""
-            if name:
-                if rel:
-                    people.append(f"{name} ({rel})")
-                else:
-                    people.append(name)
-        return {
-            "username": rec["username"],
-            "nickname": rec["nickname"] or rec["username"],
-            "age": rec["age"] or None,
-            "designation": rec["designation"] or "",
-            "location": rec["location"] or "",
-            "likes": likes,
-            "dislikes": dislikes,
-            "major_events": major_events,
-            "people": people
-        }
+def get_user_profile(username: str) -> dict:
+    query = """
+    MATCH (u:User {name: $username})
+    OPTIONAL MATCH (u)-[:LIVES_IN]->(loc:LOCATION)
+    OPTIONAL MATCH (u)-[:WORKS_AS]->(job:JOB)
+    OPTIONAL MATCH (u)-[:WORKS_AT]->(comp:COMPANY)
+    OPTIONAL MATCH (u)-[:STUDIES_AT]->(col)
+    OPTIONAL MATCH (u)-[:LIKES]->(like:Interest)
+    OPTIONAL MATCH (u)-[:DISLIKES]->(dis:Interest)
 
-def update_profile_in_neo4j(username: str, update_payload: Dict[str, Any]):
+    RETURN 
+        collect(DISTINCT loc.name) AS lives_in,
+        collect(DISTINCT job.name) AS works_as,
+        collect(DISTINCT comp.name) AS works_at,
+        collect(DISTINCT col.name) AS studies_at,
+        collect(DISTINCT like.name) AS likes,
+        collect(DISTINCT dis.name) AS dislikes
     """
-    Thread-safe Neo4j update function.
-    Prevents concurrent writes that could deadlock or hang the driver.
-    """
-    with neo4j_lock:  # 🚨 ensures only one thread writes at a time
-        with driver.session(database=NEO4J_DB) as session:
-            print(f"🔐 Acquired lock. Updating Neo4j profile for user: {username}")
-            session.execute_write(update_user_profile_tx, username, update_payload)
-            print(f"✅ Released lock after updating {username}")
+
+    with driver.session(database=NEO4J_DB) as session:
+        result = session.run(query, username=username.upper()).single()
+
+        result = {
+            "username" : f"{username}",
+            "location": [x for x in result["lives_in"] if x],
+            "works_as": [x for x in result["works_as"] if x],
+            "works_at": [x for x in result["works_at"] if x],
+            "studies_at": [x for x in result["studies_at"] if x],
+            "likes": [x for x in result["likes"] if x],
+            "dislikes": [x for x in result["dislikes"] if x]
+        }
+        print(f"user profile result: {result}")
+        def remove_empty(d: dict) -> dict:
+            return {k: v for k, v in d.items() if v not in (None, [], "", {})}
+        
+        return remove_empty(result)
+
+# def get_profile(username: str) -> Optional[Dict[str, Any]]: 
+#     with driver.session(database=NEO4J_DB) as session:
+#         rec = session.execute_read(get_user_profile_tx, username)
+#         if not rec:
+#             return None
+#         def _normalize_list_of_maps(val):
+#             if not val:
+#                 return []
+#             normalized = []
+#             for item in val:
+#                 if hasattr(item, "items"):
+#                     normalized.append(dict(item))
+#                 else:
+#                     normalized.append(item)
+#             return normalized
+#         likes = _normalize_list_of_maps(rec["likes"])
+#         dislikes = _normalize_list_of_maps(rec["dislikes"])
+#         major_events = _normalize_list_of_maps(rec["major_events"])
+#         people_maps = _normalize_list_of_maps(rec["people"])
+#         people = []
+#         for p in people_maps:
+#             name = p.get("name") if isinstance(p, dict) else None
+#             rel = p.get("relationship") if isinstance(p, dict) else ""
+#             if name:
+#                 if rel:
+#                     people.append(f"{name} ({rel})")
+#                 else:
+#                     people.append(name)
+#         return {
+#             "username": rec["username"],
+#             "nickname": rec["nickname"] or rec["username"],
+#             "age": rec["age"] or None,
+#             "job": rec["job"] or "",
+#             "location": rec["location"] or "",
+#             "likes": likes,
+#             "dislikes": dislikes,
+#             "major_events": major_events,
+#             "people": people
+#         }
+
+def update_graph_from_payload(payload: Dict[str, Any]):
+    """Entry point: handles Neo4j session and calls recursive function."""
+    with driver.session(database=NEO4J_DB) as session:
+        session.execute_write(process_payload, None, payload)
+    print("✅ Graph update completed successfully!")
+
+# def update_profile_in_neo4j(username: str, update_payload: Dict[str, Any]):
+#     """
+#     Thread-safe Neo4j update function.
+#     Prevents concurrent writes that could deadlock or hang the driver.
+#     """
+#     with neo4j_lock:  # 🚨 ensures only one thread writes at a time
+#         with driver.session(database=NEO4J_DB) as session:
+#             print(f"🔐 Acquired lock. Updating Neo4j profile for user: {username}")
+#             session.execute_write(update_user_profile_tx, username, update_payload)
+#             print(f"✅ Released lock after updating {username}")
 
 # ------------------ ENRICH PROFILE (ASYNC, safe updates) ------------------
 
@@ -396,161 +584,294 @@ async def enrich_profile(username: str):
     Extracts structured profile info using Gemini and updates Neo4j safely.
     Compatible with JSON schema:
     {
-      "nickname": "string or null",
-      "age": int or null,
-      "designation": "string or null",
-      "location": "string or null",
-      "likes": [{"name": "item", "type": "hobby/food/media/brand/etc."}],
-      "dislikes": [{"name": "item", "type": "hobby/food/media/brand/etc."}],
-      "major_events": [{"event_name": "string", "description": "short description"}],
-      "people": [{"name": "string", "relationship": "string"}]
+        "USERNODE_USERNAME": {
+            "NODETYPE1_NODENAME1": {
+                "_REL": "RELATIONSHIP1", // Primary relationship
+                "NODETYPE2_NODENAME2": "RELATIONSHIP2" // Secondary relationship
+            },
+            "NODETYPE3_NODENAME3": "RELATIONSHIP3"
+        }
     }
     """
     try:
         # 1️⃣ Fetch last 15 user messages
         res = supabase.table("conversation_history_2").select("*") \
-            .eq("sender", username).order("timestamp", desc=True).limit(15).execute()
+            .eq("sender", username).order("timestamp", desc=True).limit(30).execute()
         convos = list(reversed(res.data)) if res.data else []
         text = "\n".join([c["message"] for c in convos if "message" in c])
+        print(f"Conversation History:\n {text}")
         if not text:
             print(f"ℹ️ No messages found for {username}")
             return
-
         # 2️⃣ Extract info using Gemini
-        extract_prompt = f"""You are an AI that analyzes conversations between a user and their AI companion to extract important personal information.
+        
+        extract_prompt = f"""
+            You are an intelligent graph relation extractor.
+            Given the conversation history between a user and the system, you must extract entities and their relationships
+            according to the allowed node types and relationships below.
 
-        Task: Analyze the conversation log and extract a structured summary of key personal details.
+            Allowed Node Types:
+            USER, PERSON, LOCATION, ORGANIZATION, JOB, COMPANY, COLLEGE, SCHOOL, INTEREST, PROJECT, SKILL, DOMAIN, EVENT, COURSE
 
-        What to Extract:
+            Allowed Relationship Types:
+            STUDIES_AT, WORKS_AS,WORKS_AT, LIVES_IN, HAS_SKILL, LIKES, DISLIKES, FRIENDS_WITH, COLLEAGUES_WITH,
+            WORKS_ON, PARTICIPATED_IN, ENROLLED_IN, RELATED_TO, BELONGS_TO_DOMAIN
 
-        1. likes: Things the user enjoys or loves
-        - Hobbies and activities (e.g., "painting", "hiking")
-        - Foods and restaurants (e.g., "biryani", "Truffles")
-        - Media (e.g., "Inception", "The Beatles", "Stranger Things")
-        - Brands, places, or anything they express positive sentiment about
+            JSON Output Format:
+            {{
+                "USERNODE_USERNAME": {{
+                    "NODETYPE1_NODENAME1": {{
+                        "_REL": "RELATIONSHIP1", // Primary relationship
+                        "NODETYPE2_NODENAME2": "RELATIONSHIP2" // Secondary relationship
+                    }},
+                    "NODETYPE3_NODENAME3": "RELATIONSHIP3"
+                }}
+            }}
 
-        2. dislikes: Things the user does not enjoy or loves
-        - Hobbies and activities (e.g., "painting", "hiking")
-        - Foods and restaurants (e.g., "biryani", "Truffles")
-        - Media (e.g., "Inception", "The Beatles", "Stranger Things")
-        - Brands, places, or anything they express negative sentiment about
+            Rules:
+            1. You must always respond **only in JSON**. No text outside JSON.
+            2. Node keys must be in the format: NODETYPE_NODENAME (e.g., PERSON_SUJAL, COLLEGE_GMIT).
+            3. If the same node has both a direct and nested relationship, include "_REL" for the direct relationship.
+            4. Keep names concise and proper nouns capitalized (e.g., "INFOSIGHT", "BANGALORE").
+            5. Avoid unrelated or speculative data; extract only what’s clearly implied in the conversation.
+            6. Keep the entire response in uppercase letters. 
 
-        3. major_events: Significant life events or milestones mentioned
-        - Career changes (e.g., "started new job at Google")
-        - Life transitions (e.g., "moved to Bangalore", "graduated college")
-        - Important occasions (e.g., "sister's wedding", "promotion")
-        - Only include specific events, not general statements
-
-        4. people: Names and relationships of people in their life
-        - Format: "Name (relationship)" (e.g., "Priya (sister)", "Alex (colleague)")
-        - Include family, friends, colleagues, partners
-        - Only include if both name AND relationship are mentioned
-
-        Extraction Rules:
-        - Only extract information explicitly stated in the conversation
-        - Use lower case for all entries (even proper nouns)
-        - Don't infer or assume information not directly mentioned
-        - Use exact quotes or paraphrasing from the conversation
-        - If a category has no clear information, use an empty array []
-        - Maintain consistent formatting across all entries
-        - Remove duplicates
-
-        Output Format:
-        Return ONLY valid JSON with no additional text, explanations, or markdown:
-
-        Conversation Log:
-        {text}
-
-        Output JSON Schema:
-        {{
-        "nickname": "string or null",
-        "age": int or null,
-        "designation": "string or null",
-        "location": "string or null",
-        "likes": [{{"name": "item", "type": "hobby/food/media/brand/etc."}}],
-        "dislikes": [{{"name": "item", "type": "hobby/food/media/brand/etc."}}],
-        "major_events": [{{"event_name": "string", "description": "short description"}}],
-        "people": [{{"name": "string", "relationship": "string"}}]
-        }}
-
-        Extract and return JSON
+            Username: {username.upper()}
+            Conversation History:
+            {text}
+            Your Response (JSON Only):
         """
+
         raw = generate(extract_prompt, "gemini-2.5-pro")
         cleaned = clean_json_response(raw)
-        extracted = json.loads(cleaned)
-        print("🧠 Enrichment extracted:", json.dumps(extracted, indent=2))
+        payload = json.loads(cleaned)
 
-        # 3️⃣ Fetch existing profile
-        existing = get_profile(username)
-        if not existing:
-            print(f"⚠️ No Neo4j profile found for {username}")
-            return
+        print("🧠 Enrichment extracted:", json.dumps(payload, indent=2))
 
-        # 4️⃣ Merge new + old data
-        payload: Dict[str, Any] = {}
-
-        # Scalars
-        for key in ["nickname", "age", "designation", "location"]:
-            new_val = extracted.get(key)
-            old_val = existing.get(key)
-            if new_val not in [None, "", 0] and new_val != old_val:
-                payload[key] = new_val
-
-        # Merge lists of dicts safely
-        def merge_dict_lists(old_list, new_list, key_field):
-            if not isinstance(old_list, list): old_list = []
-            if not isinstance(new_list, list): new_list = []
-            existing_keys = {item.get(key_field) for item in old_list if isinstance(item, dict)}
-            merged = old_list[:]
-            for item in new_list:
-                if isinstance(item, dict) and item.get(key_field) and item.get(key_field) not in existing_keys:
-                    merged.append(item)
-            return merged
-
-        for field, key_field in [("likes", "name"), ("dislikes", "name"),
-                                 ("major_events", "event_name"), ("people", "name")]:
-            if extracted.get(field):
-                merged = merge_dict_lists(existing.get(field, []), extracted[field], key_field)
-                if merged != existing.get(field, []):
-                    payload[field] = merged
-
-        # 5️⃣ Sanitize & update
-        payload = sanitize_payload(payload)
-        if payload:
-            print("🔄 Updating Neo4j with payload:", json.dumps(payload, indent=2))
-            update_profile_in_neo4j(username, payload)
-        else:   
-            print(f"ℹ️ No new data to update for {username}")
+        update_graph_from_payload(payload)
 
     except Exception as e:
-        print(f"❌ enrich_profile error for {username}: {e}")
+        print(f"❌ Error during enrichment for {username}: {e}")
+
+# async def enrich_profile(username: str):
+#     """
+#     Extracts structured profile info using Gemini and updates Neo4j safely.
+#     Compatible with JSON schema:
+#     {
+#       "nickname": "string or null",
+#       "age": int or null,
+#       "job": "string or null",
+#       "location": "string or null",
+#       "likes": [{"name": "item", "type": "hobby/food/media/brand/etc."}],
+#       "dislikes": [{"name": "item", "type": "hobby/food/media/brand/etc."}],
+#       "major_events": [{"event_name": "string", "description": "short description"}],
+#       "people": [{"name": "string", "relationship": "string"}]
+#     }
+#     """
+#     try:
+#         # 1️⃣ Fetch last 15 user messages
+#         res = supabase.table("conversation_history_2").select("*") \
+#             .eq("sender", username).order("timestamp", desc=True).limit(15).execute()
+#         convos = list(reversed(res.data)) if res.data else []
+#         text = "\n".join([c["message"] for c in convos if "message" in c])
+#         if not text:
+#             print(f"ℹ️ No messages found for {username}")
+#             return
+
+#         # 2️⃣ Extract info using Gemini
+#         extract_prompt = f"""You are an AI that analyzes conversations between a user and their AI companion to extract important personal information.
+
+#         Task: Analyze the conversation log and extract a structured summary of key personal details.
+
+#         What to Extract:
+
+#         1. likes: Things the user enjoys or loves
+#         - Hobbies and activities (e.g., "painting", "hiking")
+#         - Foods and restaurants (e.g., "biryani", "Truffles")
+#         - Media (e.g., "Inception", "The Beatles", "Stranger Things")
+#         - Brands, places, or anything they express positive sentiment about
+
+#         2. dislikes: Things the user does not enjoy or loves
+#         - Hobbies and activities (e.g., "painting", "hiking")
+#         - Foods and restaurants (e.g., "biryani", "Truffles")
+#         - Media (e.g., "Inception", "The Beatles", "Stranger Things")
+#         - Brands, places, or anything they express negative sentiment about
+
+#         3. major_events: Significant life events or milestones mentioned
+#         - Career changes (e.g., "started new job at Google")
+#         - Life transitions (e.g., "moved to Bangalore", "graduated college")
+#         - Important occasions (e.g., "sister's wedding", "promotion")
+#         - Only include specific events, not general statements
+
+#         4. people: Names and relationships of people in their life
+#         - Format: "Name (relationship)" (e.g., "Priya (sister)", "Alex (colleague)")
+#         - Include family, friends, colleagues, partners
+#         - Only include if both name AND relationship are mentioned
+
+#         Extraction Rules:
+#         - Only extract information explicitly stated in the conversation
+#         - Use lower case for all entries (even proper nouns)
+#         - Don't infer or assume information not directly mentioned
+#         - Use exact quotes or paraphrasing from the conversation
+#         - If a category has no clear information, use an empty array []
+#         - Maintain consistent formatting across all entries
+#         - Remove duplicates
+
+#         Output Format:
+#         Return ONLY valid JSON with no additional text, explanations, or markdown:
+
+#         Conversation Log:
+#         {text}
+
+#         Output JSON Schema:
+#         {{
+#         "nickname": "string or null",
+#         "age": int or null,
+#         "job": "string or null",
+#         "location": "string or null",
+#         "likes": [{{"name": "item", "type": "hobby/food/media/brand/etc."}}],
+#         "dislikes": [{{"name": "item", "type": "hobby/food/media/brand/etc."}}],
+#         "major_events": [{{"event_name": "string", "description": "short description"}}],
+#         "people": [{{"name": "string", "relationship": "string"}}]
+#         }}
+
+#         Extract and return JSON
+#         """
+#         raw = generate(extract_prompt, "gemini-2.5-pro")
+#         cleaned = clean_json_response(raw)
+#         extracted = json.loads(cleaned)
+#         print("🧠 Enrichment extracted:", json.dumps(extracted, indent=2))
+
+#         # 3️⃣ Fetch existing profile
+#         existing = get_profile(username)
+#         if not existing:
+#             print(f"⚠️ No Neo4j profile found for {username}")
+#             return
+
+#         # 4️⃣ Merge new + old data
+#         payload: Dict[str, Any] = {}
+
+#         # Scalars
+#         for key in ["nickname", "age", "job", "location"]:
+#             new_val = extracted.get(key)
+#             old_val = existing.get(key)
+#             if new_val not in [None, "", 0] and new_val != old_val:
+#                 payload[key] = new_val
+
+#         # Merge lists of dicts safely
+#         def merge_dict_lists(old_list, new_list, key_field):
+#             if not isinstance(old_list, list): old_list = []
+#             if not isinstance(new_list, list): new_list = []
+#             existing_keys = {item.get(key_field) for item in old_list if isinstance(item, dict)}
+#             merged = old_list[:]
+#             for item in new_list:
+#                 if isinstance(item, dict) and item.get(key_field) and item.get(key_field) not in existing_keys:
+#                     merged.append(item)
+#             return merged
+
+#         for field, key_field in [("likes", "name"), ("dislikes", "name"),
+#                                  ("major_events", "event_name"), ("people", "name")]:
+#             if extracted.get(field):
+#                 merged = merge_dict_lists(existing.get(field, []), extracted[field], key_field)
+#                 if merged != existing.get(field, []):
+#                     payload[field] = merged
+
+#         # 5️⃣ Sanitize & update
+#         payload = sanitize_payload(payload)
+#         if payload:
+#             print("🔄 Updating Neo4j with payload:", json.dumps(payload, indent=2))
+#             update_profile_in_neo4j(username, payload)
+#         else:   
+#             print(f"ℹ️ No new data to update for {username}")
+
+#     except Exception as e:
+#         print(f"❌ enrich_profile error for {username}: {e}")
 
 # ------------------ MESSAGE CLASSIFICATION & RESPONSE ------------------
-def classify_message(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
+# def classify_message(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
 
-    likes = ', '.join([f"{like['name']}({like['type']})" for like in profile.get('likes', [])])
-    prompt = f"""You are analyzing user intent for a companion chatbot. Classify the message into exactly ONE category.
+#     likes = ', '.join([f"{like['name']}" for like in profile.get('likes', [])])
+#     prompt = f"""You are analyzing user intent for a companion chatbot. Classify the message into exactly ONE category.
 
+    # Categories :
+    # - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
+    # - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
+    # - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
+
+    # User Profile :
+    # Nickname: {profile['username']}
+    # Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    # Likes: {', '.join([f"{like}" for like in profile.get('likes', [])])}
+    # Dislikes: {', '.join([f"{dislike}" for dislike in profile.get('dislikes', [])])}
+
+    # Bot Profile :
+    # Nickname: {rohan_profile['nickname']}
+    # Likes: {', '.join(rohan_profile['likes'])}
+
+    # <Recent Conversation Context>
+    # {get_recent_history(profile['username'], 4)}
+    # </Recent Conversation Context>
+
+#     User message : "{user_input}"
+
+    # <Classification Guidelines>
+    # 1. Look for question words and action-seeking language for "Suggestive"
+    # 2. Identify reflective, emotional, or philosophical tone for "Discussive"
+    # 3. Detect humor markers, emojis, playful language for "Humorous"
+    # 4. Consider the conversation flow and user's typical communication style
+    # </Classification Guidelines>
+
+#     Return ONLY one word: Suggestive, Discussive, or Humorous
+#     """
+#     raw = generate(prompt)
+#     raw_l = (raw or "").lower()
+#     if "suggest" in raw_l:
+#         return "suggestive"
+#     if "humor" in raw_l or "humorous" in raw_l:
+#         return "humorous"
+#     return "discussive"
+
+def classify_message(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> Dict[str, Any]:
+
+    prompt = f"""
+    You must analyze the user's message and respond ONLY in JSON.
+
+    TASKS:
+    1. Classify message into EXACTLY one: "discussive", "suggestive", "humourous".
     Categories :
     - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
     - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
     - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
 
+    2. Identify additional user-related details from the message:
+       - People names → PERSON_<NAME>
+       - Places → LOCATION_<NAME>
+       - Events → EVENT_<NAME>
+       - Companies → COMPANY_<NAME>
+       - Colleges / Schools → COLLEGE_<NAME>
+       - Interests → INTEREST_<NAME>
+
+    JSON OUTPUT STRICT FORMAT:
+    {{
+        "category": "suggestive | discussive | humourous",
+        "additional_info": ["PERSON_JOHN", "EVENT_CONCERT", "LOCATION_LONDON"]
+    }}
+
+    <Recent Conversation Context>
+    {get_recent_history(profile['username'], 4)}
+    </Recent Conversation Context>
+
     User Profile :
-    Nickname: {profile['nickname']}
-    Designation: {profile['designation']}
-    Likes: {', '.join([f"{like['name']}({like['type']})" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}({dislike['type']})" for dislike in profile.get('dislikes', [])])}
-    
+    Nickname: {profile['username']}
+    Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    Likes: {', '.join([f"{like}" for like in profile.get('likes', [])])}
+    Dislikes: {', '.join([f"{dislike}" for dislike in profile.get('dislikes', [])])}
+
     Bot Profile :
     Nickname: {rohan_profile['nickname']}
     Likes: {', '.join(rohan_profile['likes'])}
 
-    <Recent Conversation Context>
-    {get_recent_history(profile['nickname'], 4)}
-    </Recent Conversation Context>
-
-    User message : "{user_input}"
+    Message: "{user_input}"
 
     <Classification Guidelines>
     1. Look for question words and action-seeking language for "Suggestive"
@@ -559,17 +880,20 @@ def classify_message(user_input: str, profile: Dict[str, Any], rohan_profile: Di
     4. Consider the conversation flow and user's typical communication style
     </Classification Guidelines>
 
-    Return ONLY one word: Suggestive, Discussive, or Humorous
+    Return ONLY JSON. No markdown, no explanation.
     """
-    raw = generate(prompt)
-    raw_l = (raw or "").lower()
-    if "suggest" in raw_l:
-        return "suggestive"
-    if "humor" in raw_l or "humorous" in raw_l:
-        return "humorous"
-    return "discussive"
 
-def handle_suggestive(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
+    raw = generate(prompt)
+    cleaned = clean_json_response(raw)
+
+    try:
+        data = json.loads(cleaned)
+        return data
+    except:
+        return {"category": "discussive", "additional_info": []}
+
+
+def handle_suggestive(user_input: str, profile: Dict[str, Any], additional_details: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
     prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
     You are a supportive and knowledgeable friend. The user is seeking advice, recommendations, or suggestions.
 
@@ -594,27 +918,30 @@ def handle_suggestive(user_input: str, profile: Dict[str, Any], rohan_profile: D
     </Response Style>
 
     <User Profile>
-    Nickname: {profile['nickname']}
-    Age: {profile['age']}
-    Designation: {profile['designation']}
-    Location: {profile['location']}
-    Likes: {', '.join([f"{like['name']}({like['type']})" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}({dislike['type']})" for dislike in profile.get('dislikes', [])])}
-    Major Events: {', '.join([f"{event['event_name']}({event['description']})" for event in profile.get('major_events', [])])}
-    Key People: {', '.join([f"{person['name']}({person['relationship']})" for person in profile.get('people', [])])}
+    Nickname: {profile['username']}
+    Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
+    Company: {', '.join([f"{company}" for company in profile.get('works_at', [])])}
+    School/ College: {', '.join([f"{clg}" for clg in profile.get('studies_at', [])])}
+    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
+    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
     <User Profile>
     
     <Bot Profile>
     Name: {rohan_profile['nickname']}
     Age: {rohan_profile['age']}
-    Designation: {rohan_profile['designation']}
+    Job: {rohan_profile['designation']}
     Likes: {', '.join(rohan_profile['likes'])}
     Life Events: {', '.join(rohan_profile['major_events'])}
     Important People: {', '.join(rohan_profile['people'])}
     </Bot Profile>
 
+    <additional_info>
+    {additional_details}
+    <additional_info>
+
     <Conversation History>
-    {get_recent_history(profile['nickname'], 6)}
+    {get_recent_history(profile['username'], 6)}
     </Conversation History>
 
     User's Request: {user_input}
@@ -623,7 +950,62 @@ def handle_suggestive(user_input: str, profile: Dict[str, Any], rohan_profile: D
     """
     return generate(prompt)
 
-def handle_discussive(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
+def handle_discussive(user_input: str, profile: Dict[str, Any], additional_details: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
+    prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
+    You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
+
+    <Your Approach>
+    - Give chating style response - short, use acronyms
+    - Engage authentically with their thoughts and feelings
+    - Show genuine curiosity about their perspective
+    - Validate their emotions without being patronizing
+    - Share thoughtful insights that add depth to the conversation
+    - Ask gentle follow-up questions to deepen understanding (1 question per response max)
+    - Mirror their emotional tone while offering support or new perspectives
+    </Your Approach>
+
+    Conversation Guidelines:
+    - Be natural and human-like, avoid AI-ish or robotic phrasing, donot mention you are an AI
+    - Use their likes and background to personalize responses
+    - Show you remember previous conversations
+    - Balance listening with contributing meaningful thoughts
+    - Keep responses conversational (40-50 words)
+    - Don't force positivity if they're expressing difficult emotions
+    - Do not respond in markdown format
+
+    <User Profile>
+    Nickname: {profile['username']}
+    Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
+    Company: {', '.join([f"{company}" for company in profile.get('works_at', [])])}
+    School/ College: {', '.join([f"{clg}" for clg in profile.get('studies_at', [])])}
+    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
+    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
+    <User Profile>
+
+    Bot Profile:
+    Name: {rohan_profile['nickname']}
+    Age: {rohan_profile['age']}
+    job: {rohan_profile['designation']}
+    Likes: {', '.join(rohan_profile['likes'])}
+    Dislikes: {', '.join(rohan_profile['dislikes'])}
+    Life Events: {', '.join(rohan_profile['major_events'])}
+    Important People: {', '.join(rohan_profile['people'])}
+
+    Conversation History:
+    {get_recent_history(profile['username'], 10)}
+
+    <additional_info>
+    {additional_details}
+    <additional_info>
+
+    User's Message: {user_input}
+
+    Respond with empathy and depth:
+    """
+    return generate(prompt)
+
+def handle_humorous(user_input: str, profile: Dict[str, Any], additional_details: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
     prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
     You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
 
@@ -647,26 +1029,27 @@ def handle_discussive(user_input: str, profile: Dict[str, Any], rohan_profile: D
     - Do not respond in markdown format
 
     User Profile:
-    Nickname: {profile['nickname']}
-    Age: {profile['age']}
-    Designation: {profile['designation']}
-    Location: {profile['location']}
-    Likes: {', '.join([f"{like['name']}({like['type']})" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}({dislike['type']})" for dislike in profile.get('dislikes', [])])}
-    Major Events: {', '.join([f"{event['event_name']}({event['description']})" for event in profile.get('major_events', [])])}
-    Key People: {', '.join([f"{person['name']}({person['relationship']})" for person in profile.get('people', [])])}
+    Nickname: {profile['username']}
+    Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
+    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
+    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
 
     Bot Profile:
     Name: {rohan_profile['nickname']}
     Age: {rohan_profile['age']}
-    Designation: {rohan_profile['designation']}
+    job: {rohan_profile['designation']}
     Likes: {', '.join(rohan_profile['likes'])}
     Dislikes: {', '.join(rohan_profile['dislikes'])}
     Life Events: {', '.join(rohan_profile['major_events'])}
     Important People: {', '.join(rohan_profile['people'])}
 
     Conversation History:
-    {get_recent_history(profile['nickname'], 10)}
+    {get_recent_history(profile['username'], 10)}
+
+    <additional_info>
+    {additional_details}
+    <additional_info>
 
     User's Message: {user_input}
 
@@ -674,72 +1057,51 @@ def handle_discussive(user_input: str, profile: Dict[str, Any], rohan_profile: D
     """
     return generate(prompt)
 
-def handle_humorous(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> str:
-    prompt = f"""You are Rohan. Your Personality is ENTP type with casual GenZ indian slang.
-    You are a thoughtful, empathetic, and emotionally intelligent friend. The user wants to have a meaningful conversation.
-
-    <Your Approach>
-    - Give chating style response - short, use acronyms
-    - Engage authentically with their thoughts and feelings
-    - Show genuine curiosity about their perspective
-    - Validate their emotions without being patronizing
-    - Share thoughtful insights that add depth to the conversation
-    - Ask gentle follow-up questions to deepen understanding (1 question per response max)
-    - Mirror their emotional tone while offering support or new perspectives
-    </Your Approach>
-
-    Conversation Guidelines:
-    - Be natural and human-like, avoid AI-ish or robotic phrasing, donot mention you are an AI
-    - Use their likes and background to personalize responses
-    - Show you remember previous conversations
-    - Balance listening with contributing meaningful thoughts
-    - Keep responses conversational (40-50 words)
-    - Don't force positivity if they're expressing difficult emotions
-    - Do not respond in markdown format
-
-    User Profile:
-    Nickname: {profile['nickname']}
-    Age: {profile['age']}
-    Designation: {profile['designation']}
-    Location: {profile['location']}
-    Likes: {', '.join([f"{like['name']}({like['type']})" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}({dislike['type']})" for dislike in profile.get('dislikes', [])])}
-    Major Events: {', '.join([f"{event['event_name']}({event['description']})" for event in profile.get('major_events', [])])}
-    Key People: {', '.join([f"{person['name']}({person['relationship']})" for person in profile.get('people', [])])}
-
-    Bot Profile:
-    Name: {rohan_profile['nickname']}
-    Age: {rohan_profile['age']}
-    Designation: {rohan_profile['designation']}
-    Likes: {', '.join(rohan_profile['likes'])}
-    Dislikes: {', '.join(rohan_profile['dislikes'])}
-    Life Events: {', '.join(rohan_profile['major_events'])}
-    Important People: {', '.join(rohan_profile['people'])}
-
-    Conversation History:
-    {get_recent_history(profile['nickname'], 10)}
-
-    User's Message: {user_input}
-
-    Respond with empathy and depth:
-    """
-    return generate(prompt)
+# def chatbot_reply(user_input: str, username: str):
+#     # profile = get_profile(username)
+#     profile = get_user_profile(username)
+#     print("profile for chatbot_reply:", profile)
+#     if not profile:
+#         raise HTTPException(status_code=404, detail="User profile not found")
+#     rohan_profile = get_rohan_profile() or {"nickname": "Rohan", "likes": []}
+#     category = classify_message(user_input, profile, rohan_profile)
+#     if category == "suggestive":
+#         reply = handle_suggestive(user_input, profile, rohan_profile)
+#     elif category == "humorous":
+#         reply = handle_humorous(user_input, profile, rohan_profile)
+#     else:
+#         reply = handle_discussive(user_input, profile, rohan_profile)
+#     add_conversation(username, "Rohan", user_input, "user input")
+#     add_conversation("Rohan", username, reply, category)
+#     return reply, category
 
 def chatbot_reply(user_input: str, username: str):
-    profile = get_profile(username)
-    print("profile for chatbot_reply:", profile)
+    profile = get_user_profile(username)
     if not profile:
         raise HTTPException(status_code=404, detail="User profile not found")
+
     rohan_profile = get_rohan_profile() or {"nickname": "Rohan", "likes": []}
-    category = classify_message(user_input, profile, rohan_profile)
+
+    classification = classify_message(user_input, profile, rohan_profile)
+
+    category = classification.get("category", "discussive").lower()
+    additional_info = classification.get("additional_info", [])
+    print(f"Additional Info : {additional_info}")
+    # NEW: Fetch additional Neo4j details for this message
+    extracted_details = extract_additional_details(additional_info, username)
+    print("Additional extracted details:", extracted_details)
+
+    # Use category to route
     if category == "suggestive":
-        reply = handle_suggestive(user_input, profile, rohan_profile)
-    elif category == "humorous":
-        reply = handle_humorous(user_input, profile, rohan_profile)
+        reply = handle_suggestive(user_input, profile, extracted_details, rohan_profile)
+    elif category == "humourous":
+        reply = handle_humorous(user_input, profile, extracted_details, rohan_profile)
     else:
-        reply = handle_discussive(user_input, profile, rohan_profile)
+        reply = handle_discussive(user_input, profile, extracted_details, rohan_profile)
+
     add_conversation(username, "Rohan", user_input, "user input")
     add_conversation("Rohan", username, reply, category)
+
     return reply, category
 
 # ------------------ ROUTES ------------------
@@ -757,7 +1119,7 @@ def signup(req: SignupRequest):
         "username": req.username,
         "nickname": req.nickname,
         "age": req.age,
-        "designation": req.designation,
+        "job": req.job,
         "location": req.location,
         "likes": req.likes or []
     }
@@ -811,11 +1173,10 @@ async def chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     reply, category = chatbot_reply(req.message, username)
 
     total = supabase.table("conversation_history_2").select("id", count="exact").eq("sender", username).execute()
-    if total.count and total.count % 15 == 0:
+    if total.count : #and total.count % 15 == 0
         asyncio.create_task(enrich_profile(username))
 
     return {"reply": reply, "category": category}
-
 
 # @app.get("/history")
 # def history(username: str, offset: int = Query(0, ge=0), limit: int = Query(20, gt=0)):
