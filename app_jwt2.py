@@ -38,6 +38,8 @@ NEO4J_PASS = os.getenv("NEO4J_PASS")
 NEO4J_DB = os.getenv("NEO4J_DB", "rohan-db")
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+if driver :
+    print("Driver created successfully")
 neo4j_lock = Lock()
 
 LOG_FILE = "gemini_usage_log.jsonl"
@@ -98,8 +100,9 @@ def generate(prompt: str, model: str = "gemini-2.5-pro") -> str:
             except Exception:
                 pass
         return getattr(res, "text", "").strip()
-    except Exception:
-        return f"Error : {str(Exception)}"
+    except Exception as e:
+        print(f"Gemini Error: {str(e)}")
+        return f"Error : {str(e)}"
     
 
 # --- Helper to create token ---
@@ -166,7 +169,7 @@ def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 def create_user_profile_tx(tx, user_data: Dict[str, Any]):
     print("user_data in create_user_profile_tx:", user_data)
     query = """
-    MERGE (u:User {name: $username})
+    MERGE (u:USER {name: $username})
     SET u.nickname = $nickname
     SET u.age = $age
     WITH u
@@ -244,7 +247,7 @@ def extract_additional_details(info_list: List[str], username: str) -> Dict[str,
                 continue
 
             query = f"""
-            MATCH (u:User {{username: $username}})
+            MATCH (u:User {{name: $username}})
             OPTIONAL MATCH (u)-[r1]->(n)
             MATCH (n:{ntype} {{name: $name}})
             OPTIONAL MATCH (n)-[r]->(nbr)
@@ -485,7 +488,7 @@ def create_profile_in_neo4j(user_dict: Dict[str, Any]):
 
 def get_user_profile(username: str) -> dict:
     query = """
-    MATCH (u:User {name: $username})
+    MATCH (u:USER {name: $username})
     OPTIONAL MATCH (u)-[:LIVES_IN]->(loc:LOCATION)
     OPTIONAL MATCH (u)-[:WORKS_AS]->(job:JOB)
     OPTIONAL MATCH (u)-[:WORKS_AT]->(comp:COMPANY)
@@ -494,6 +497,8 @@ def get_user_profile(username: str) -> dict:
     OPTIONAL MATCH (u)-[:DISLIKES]->(dis:Interest)
 
     RETURN 
+        u.nickname AS nickname,
+        u.age AS age,
         collect(DISTINCT loc.name) AS lives_in,
         collect(DISTINCT job.name) AS works_as,
         collect(DISTINCT comp.name) AS works_at,
@@ -503,10 +508,25 @@ def get_user_profile(username: str) -> dict:
     """
 
     with driver.session(database=NEO4J_DB) as session:
-        result = session.run(query, username=username.upper()).single()
-
+        # result = session.run(query).single()
+        result = session.run(query, username=username).single()
+        if not result:
+            return {
+                "username": username,
+                "nickname": None,
+                "age": None,
+                "location": [],
+                "works_as": [],
+                "works_at": [],
+                "studies_at": [],
+                "likes": [],
+                "dislikes": []
+            }
+        
         result = {
             "username" : f"{username}",
+            "nickname": result.get('nickname', f"{username}"),
+            "age": result.get('age',18),
             "location": [x for x in result["lives_in"] if x],
             "works_as": [x for x in result["works_as"] if x],
             "works_at": [x for x in result["works_at"] if x],
@@ -584,7 +604,7 @@ async def enrich_profile(username: str):
     Extracts structured profile info using Gemini and updates Neo4j safely.
     Compatible with JSON schema:
     {
-        "USERNODE_USERNAME": {
+        "USER_USERNAME": {
             "NODETYPE1_NODENAME1": {
                 "_REL": "RELATIONSHIP1", // Primary relationship
                 "NODETYPE2_NODENAME2": "RELATIONSHIP2" // Secondary relationship
@@ -596,7 +616,7 @@ async def enrich_profile(username: str):
     try:
         # 1️⃣ Fetch last 15 user messages
         res = supabase.table("conversation_history_2").select("*") \
-            .eq("sender", username).order("timestamp", desc=True).limit(30).execute()
+            .eq("sender", username).order("timestamp", desc=True).limit(5).execute()
         convos = list(reversed(res.data)) if res.data else []
         text = "\n".join([c["message"] for c in convos if "message" in c])
         print(f"Conversation History:\n {text}")
@@ -619,7 +639,7 @@ async def enrich_profile(username: str):
 
             JSON Output Format:
             {{
-                "USERNODE_USERNAME": {{
+                "USER_USERNAME": {{
                     "NODETYPE1_NODENAME1": {{
                         "_REL": "RELATIONSHIP1", // Primary relationship
                         "NODETYPE2_NODENAME2": "RELATIONSHIP2" // Secondary relationship
@@ -635,6 +655,7 @@ async def enrich_profile(username: str):
             4. Keep names concise and proper nouns capitalized (e.g., "INFOSIGHT", "BANGALORE").
             5. Avoid unrelated or speculative data; extract only what’s clearly implied in the conversation.
             6. Keep the entire response in uppercase letters. 
+            7. Use USER_<username> in the json begining
 
             Username: {username.upper()}
             Conversation History:
@@ -833,54 +854,113 @@ async def enrich_profile(username: str):
 
 def classify_message(user_input: str, profile: Dict[str, Any], rohan_profile: Dict[str, Any]) -> Dict[str, Any]:
 
+    # prompt = f"""
+    # You must analyze the user's message and respond ONLY in JSON.
+
+    # TASKS:
+    # 1. Classify message into EXACTLY one: "discussive", "suggestive", "humourous".
+    # Categories :
+    # - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
+    # - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
+    # - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
+
+    # 2. Identify additional user-related details from the message:
+    #    - People names → PERSON_<NAME>
+    #    - Places → LOCATION_<NAME>
+    #    - Events → EVENT_<NAME>
+    #    - Companies → COMPANY_<NAME>
+    #    - Colleges / Schools → COLLEGE_<NAME>
+    #    - Interests → INTEREST_<NAME>
+
+    # JSON OUTPUT STRICT FORMAT:
+    # {{
+    #     "category": "suggestive | discussive | humourous",
+    #     "additional_info": ["PERSON_JOHN", "EVENT_CONCERT", "LOCATION_LONDON"]
+    # }}
+
+    # <Recent Conversation Context>
+    # {get_recent_history(profile['username'], 4)}
+    # </Recent Conversation Context>
+
+    # User Profile :
+    # Nickname: {profile.get('nickname')}
+    # Age: {profile.get('age')}
+    # Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
+    # Likes: {', '.join([f"{like}" for like in profile.get('likes', [])])}
+    # Dislikes: {', '.join([f"{dislike}" for dislike in profile.get('dislikes', [])])}
+
+    # Bot Profile :
+    # Nickname: {rohan_profile['nickname']}
+    # Likes: {', '.join(rohan_profile['likes'])}
+
+    # Message: "{user_input}"
+
+    # <Classification Guidelines>
+    # 1. Look for question words and action-seeking language for "Suggestive"
+    # 2. Identify reflective, emotional, or philosophical tone for "Discussive"
+    # 3. Detect humor markers, emojis, playful language for "Humorous"
+    # 4. Consider the conversation flow and user's typical communication style
+    # </Classification Guidelines>
+
+    # Return ONLY JSON. No markdown, no explanation.
+    # """
+
     prompt = f"""
-    You must analyze the user's message and respond ONLY in JSON.
+    You must analyze the user's message and return a STRICT JSON response. 
+    Do NOT include any explanation, markdown, or text outside JSON.
 
-    TASKS:
-    1. Classify message into EXACTLY one: "discussive", "suggestive", "humourous".
-    Categories :
-    - Suggestive: User is seeking advice, recommendations, tips, suggestions, or asking "what should I..." type questions
-    - Discussive: User wants meaningful dialogue, to explore ideas, share emotions, or engage in thoughtful conversation
-    - Humorous: User wants jokes, playful interaction, light-hearted fun, or is being deliberately funny/casual
+    PRIMARY TASKS
 
-    2. Identify additional user-related details from the message:
-       - People names → PERSON_<NAME>
-       - Places → LOCATION_<NAME>
-       - Events → EVENT_<NAME>
-       - Companies → COMPANY_<NAME>
-       - Colleges / Schools → COLLEGE_<NAME>
-       - Interests → INTEREST_<NAME>
+    1. Classify the user's message into EXACTLY one of the following:
+    - "suggestive" → User seeks advice, tips, recommendations, or what-to-do guidance.
+    - "discussive" → User wants a meaningful conversation, emotional sharing, or reflective thoughts.
+    - "humourous" → User is playful, joking, teasing, or using humour/emojis.
 
-    JSON OUTPUT STRICT FORMAT:
+    2. Extract all additional entities mentioned in the CURRENT message.
+    Convert extracted entities into the following UPPERCASE formats:
+
+    - Persons → PERSON_<NAME>
+    - Locations → LOCATION_<NAME>
+    - Events → EVENT_<NAME>
+    - Companies → COMPANY_<NAME>
+    - Colleges / Schools → COLLEGE_<NAME>
+    - Interests / Hobbies / Likes → INTEREST_<NAME>
+
+    RULES FOR ENTITY EXTRACTION:
+    - Extract ONLY entities explicitly mentioned or strongly implied.
+    - Convert all names to UPPERCASE.
+    - Use only letters (A–Z), digits allowed (e.g., EVENT_G20).
+    - Do NOT invent or hallucinate entities.
+    - Do NOT include common nouns (e.g., “friend”, “office”, “work”).
+    - Do NOT include bot-related or system text.
+    - Avoid duplicates.
+    - Output array may be empty.
+
+    JSON OUTPUT FORMAT (STRICT)
     {{
-        "category": "suggestive | discussive | humourous",
-        "additional_info": ["PERSON_JOHN", "EVENT_CONCERT", "LOCATION_LONDON"]
+    "category": "suggestive | discussive | humourous",
+    "additional_info": ["PERSON_JOHN", "LOCATION_DELHI"]
     }}
 
-    <Recent Conversation Context>
+    CONTEXT
+    Recent User Messages:
     {get_recent_history(profile['username'], 4)}
-    </Recent Conversation Context>
 
-    User Profile :
-    Nickname: {profile['username']}
-    Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
-    Likes: {', '.join([f"{like}" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike}" for dislike in profile.get('dislikes', [])])}
+    User Profile:
+    - Nickname: {profile.get('nickname')}
+    - Age: {profile.get('age')}
+    - Job: {', '.join(profile.get('works_as', []))}
+    - Likes: {', '.join(profile.get('likes', []))}
+    - Dislikes: {', '.join(profile.get('dislikes', []))}
 
-    Bot Profile :
-    Nickname: {rohan_profile['nickname']}
-    Likes: {', '.join(rohan_profile['likes'])}
+    Bot Profile:
+    - Nickname: {rohan_profile['nickname']}
+    - Likes: {', '.join(rohan_profile['likes'])}
 
-    Message: "{user_input}"
+    USER MESSAGE TO ANALYZE
+    "{user_input}"
 
-    <Classification Guidelines>
-    1. Look for question words and action-seeking language for "Suggestive"
-    2. Identify reflective, emotional, or philosophical tone for "Discussive"
-    3. Detect humor markers, emojis, playful language for "Humorous"
-    4. Consider the conversation flow and user's typical communication style
-    </Classification Guidelines>
-
-    Return ONLY JSON. No markdown, no explanation.
+    Return ONLY valid JSON. No notes, no commentary, no extra words.
     """
 
     raw = generate(prompt)
@@ -918,13 +998,14 @@ def handle_suggestive(user_input: str, profile: Dict[str, Any], additional_detai
     </Response Style>
 
     <User Profile>
-    Nickname: {profile['username']}
+    Nickname: {profile.get('nickname')}
+    Age: {profile.get('age')}
     Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
     Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
     Company: {', '.join([f"{company}" for company in profile.get('works_at', [])])}
     School/ College: {', '.join([f"{clg}" for clg in profile.get('studies_at', [])])}
-    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
+    Likes: {', '.join(profile.get('likes', []))}
+    Dislikes: {', '.join(profile.get('dislikes', []))}
     <User Profile>
     
     <Bot Profile>
@@ -974,13 +1055,14 @@ def handle_discussive(user_input: str, profile: Dict[str, Any], additional_detai
     - Do not respond in markdown format
 
     <User Profile>
-    Nickname: {profile['username']}
+    Nickname: {profile.get('nickname')}
+    Age: {profile.get('age')}
     Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
     Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
     Company: {', '.join([f"{company}" for company in profile.get('works_at', [])])}
     School/ College: {', '.join([f"{clg}" for clg in profile.get('studies_at', [])])}
-    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
+    Likes: {', '.join(profile.get('likes', []))}
+    Dislikes: {', '.join(profile.get('dislikes', []))}
     <User Profile>
 
     Bot Profile:
@@ -1029,11 +1111,12 @@ def handle_humorous(user_input: str, profile: Dict[str, Any], additional_details
     - Do not respond in markdown format
 
     User Profile:
-    Nickname: {profile['username']}
+    Nickname: {profile.get('nickname')}
+    Age: {profile.get('age')}
     Job: {', '.join([f"{job}" for job in profile.get('job', [])])}
     Location: {', '.join([f"{location}" for location in profile.get('location', [])])}
-    Likes: {', '.join([f"{like['name']}" for like in profile.get('likes', [])])}
-    Dislikes: {', '.join([f"{dislike['name']}" for dislike in profile.get('dislikes', [])])}
+    Likes: {', '.join(profile.get('likes', []))}
+    Dislikes: {', '.join(profile.get('dislikes', []))}
 
     Bot Profile:
     Name: {rohan_profile['nickname']}
@@ -1076,7 +1159,7 @@ def handle_humorous(user_input: str, profile: Dict[str, Any], additional_details
 #     return reply, category
 
 def chatbot_reply(user_input: str, username: str):
-    profile = get_user_profile(username)
+    profile = get_user_profile(username.upper())
     if not profile:
         raise HTTPException(status_code=404, detail="User profile not found")
 
@@ -1088,7 +1171,7 @@ def chatbot_reply(user_input: str, username: str):
     additional_info = classification.get("additional_info", [])
     print(f"Additional Info : {additional_info}")
     # NEW: Fetch additional Neo4j details for this message
-    extracted_details = extract_additional_details(additional_info, username)
+    extracted_details = extract_additional_details(additional_info, username.upper())
     print("Additional extracted details:", extracted_details)
 
     # Use category to route
@@ -1116,7 +1199,7 @@ def signup(req: SignupRequest):
         "password": req.password
     }).execute()
     user_data = {
-        "username": req.username,
+        "username": req.username.upper(),
         "nickname": req.nickname,
         "age": req.age,
         "job": req.job,
@@ -1173,7 +1256,7 @@ async def chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     reply, category = chatbot_reply(req.message, username)
 
     total = supabase.table("conversation_history_2").select("id", count="exact").eq("sender", username).execute()
-    if total.count : #and total.count % 15 == 0
+    if total.count and total.count % 3 == 0 :
         asyncio.create_task(enrich_profile(username))
 
     return {"reply": reply, "category": category}
