@@ -103,7 +103,6 @@ def generate(prompt: str, model: str = "gemini-2.5-pro") -> str:
     except Exception as e:
         print(f"Gemini Error: {str(e)}")
         return f"Error : {str(e)}"
-    
 
 # --- Helper to create token ---
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -1344,4 +1343,4 @@ def shutdown_event():
 
 # ------------------ RUN ------------------
 if __name__ == "__main__":
-    uvicorn.run("app_jwt2:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
