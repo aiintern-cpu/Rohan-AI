@@ -1255,7 +1255,7 @@ async def chat(req: ChatRequest, current_user: str = Depends(get_current_user)):
     reply, category = chatbot_reply(req.message, username)
 
     total = supabase.table("conversation_history_2").select("id", count="exact").eq("sender", username).execute()
-    if total.count and total.count % 3 == 0 :
+    if total.count and total.count % 5 == 0 :
         asyncio.create_task(enrich_profile(username))
 
     return {"reply": reply, "category": category}
